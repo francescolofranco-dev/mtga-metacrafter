@@ -24,10 +24,15 @@ func main() {
 	cfg := loadConfig()
 	logger := newLogger(cfg.LogLevel)
 
+	slugs := make([]string, 0, len(cfg.Formats))
+	for _, f := range cfg.Formats {
+		slugs = append(slugs, f.Slug)
+	}
 	logger.Info("metacrafter starting",
 		"listen_addr", cfg.ListenAddr,
 		"data_dir", cfg.DataDir,
 		"refresh_period", cfg.RefreshPeriod.String(),
+		"formats", slugs,
 		"admin_enabled", cfg.AdminToken != "")
 
 	if err := run(cfg, logger); err != nil {
@@ -43,6 +48,7 @@ type config struct {
 	SeedPath      string
 	RefreshPeriod time.Duration
 	LogLevel      slog.Level
+	Formats       []mtggoldfish.FormatSpec // resolved from FORMATS env
 }
 
 func loadConfig() config {
@@ -51,9 +57,31 @@ func loadConfig() config {
 		DataDir:       envOr("DATA_DIR", "./data"),
 		AdminToken:    os.Getenv("ADMIN_TOKEN"),
 		SeedPath:      envOr("SEED_PATH", "./seed.json"),
-		RefreshPeriod: envDuration("REFRESH_PERIOD", 168*time.Hour),
+		RefreshPeriod: envDuration("REFRESH_PERIOD", 24*time.Hour),
 		LogLevel:      parseLevel(envOr("LOG_LEVEL", "info")),
+		Formats:       parseFormats(envOr("FORMATS", "standard,pioneer")),
 	}
+}
+
+// parseFormats turns a comma-separated slug list into FormatSpecs. Unknown
+// slugs are skipped (with a stderr line — main logs them via the slog after
+// loadConfig).
+func parseFormats(s string) []mtggoldfish.FormatSpec {
+	var out []mtggoldfish.FormatSpec
+	for _, raw := range strings.Split(s, ",") {
+		slug := strings.ToLower(strings.TrimSpace(raw))
+		if slug == "" {
+			continue
+		}
+		if f, ok := mtggoldfish.FormatBySlug(slug); ok {
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		// Always have at least one — fall back to Standard.
+		out = []mtggoldfish.FormatSpec{{Slug: "standard", DisplayName: "Standard"}}
+	}
+	return out
 }
 
 func run(cfg config, logger *slog.Logger) error {
@@ -66,7 +94,14 @@ func run(cfg config, logger *slog.Logger) error {
 		logger.Warn("seed load failed", "err", err)
 	}
 	if ds := st.Get(); ds != nil {
-		logger.Info("snapshot loaded", "cards", len(ds.Cards), "generated_at", ds.GeneratedAt.Format(time.RFC3339))
+		totalCards := 0
+		for _, f := range ds.Formats {
+			totalCards += len(f.Cards)
+		}
+		logger.Info("snapshot loaded",
+			"formats", len(ds.Formats),
+			"total_cards", totalCards,
+			"generated_at", ds.GeneratedAt.Format(time.RFC3339))
 	} else {
 		logger.Info("no snapshot — first scrape will populate the store")
 	}
@@ -75,11 +110,12 @@ func run(cfg config, logger *slog.Logger) error {
 		Scryfall:    scryfall.NewClient(logger.With("comp", "scryfall")),
 		MTGGoldfish: mtggoldfish.NewClient(logger.With("comp", "mtggoldfish")),
 		Logger:      logger,
+		Formats:     cfg.Formats,
 	}
 
 	sched := scheduler.New(cfg.RefreshPeriod, pipeCfg, st, logger.With("comp", "scheduler"))
 
-	srv, err := server.New(st, sched, logger.With("comp", "server"), cfg.AdminToken)
+	srv, err := server.New(st, sched, logger.With("comp", "server"), cfg.AdminToken, cfg.Formats)
 	if err != nil {
 		return err
 	}

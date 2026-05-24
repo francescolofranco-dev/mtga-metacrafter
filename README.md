@@ -18,34 +18,33 @@ but never in a single, easy-to-scan list. This is that list.
 
 - **Card data**: [Scryfall](https://scryfall.com/docs/api) bulk JSON
   (official, free).
-- **Meta data**: [MTGGoldfish Standard
-  metagame](https://www.mtggoldfish.com/metagame/standard) — archetype
-  metashare and representative decklists. Scraped weekly at a polite
-  cadence (1 request/second, descriptive `User-Agent`). If you maintain
-  MTGGoldfish and would like this removed, please open an issue and we'll
-  take it down.
+- **Tournament data**: [MTGGoldfish](https://www.mtggoldfish.com/) recent
+  tournament listings per format. For each format we take the most recent
+  non-League events (last 30 days) and pull their top deck standings.
+  Scraped daily at a polite cadence (1 req/sec, descriptive `User-Agent`).
+  If you maintain MTGGoldfish and want this removed, open an issue.
 - **Scoring**:
-  `score(card) = Σ (archetype_metashare_pct × inclusion_pct × avg_copies / 100)`,
-  summed over the archetypes that play it. A 4-of with 100% inclusion in a
-  20%-meta deck contributes 80 points; a 1-of with 30% inclusion in a 5% deck
-  contributes 1.5.
-- **Recommended copies**: the max average copies the card runs across
-  archetypes with ≥ 3% metashare, rounded and clamped to 1–4.
+  `score(card) = Σ over decks (copies_in_deck × tier_weight)`, where
+  `tier_weight = stars + 1` (so a 3-star Pro Tour deck counts 4× a base
+  challenge deck). MTGO leagues are excluded entirely.
+- **Recommended copies**: the max copy count seen for that card in any
+  single deck, clamped to 1–4.
+- **Cross-format bonus**: every card row shows other formats where the
+  same card is also in the top-30 (e.g. a Standard card flagged "+Pioneer").
 
 ## Architecture
 
 A single Go binary. It serves the site via `html/template` + HTMX and
-runs the scraper on an internal weekly schedule, storing the result in
+runs the scraper on an internal daily schedule, holding the result in
 memory plus a JSON snapshot on disk. Deployed on Fly.io.
 
 ## Known limitations
 
-- "Most played" isn't always "best to craft" — a budget player may prefer
-  cheaper, slightly-less-played cards. A budget mode is on the v2 roadmap.
+- "Most played in top tournaments" isn't always "best to craft" for a
+  budget player. A budget mode (weight by inverse rarity) is on the roadmap.
 - Standard rotation (every September) stales the data instantly; the
   page surfaces a "data as of …" banner.
-- No cross-format bonus and no MTGA collection sync in v1 — both
-  deferred.
+- No MTGA collection sync yet — deferred.
 
 ## Development
 
@@ -63,8 +62,11 @@ Environment variables:
 | `DATA_DIR`        | `./data`         | snapshot location                    |
 | `ADMIN_TOKEN`     | (unset)          | secret required for `/admin/refresh` |
 | `SEED_PATH`       | `./seed.json`    | initial dataset for empty `DATA_DIR` |
-| `REFRESH_PERIOD`  | `168h` (1 week)  | scrape interval                      |
+| `REFRESH_PERIOD`  | `24h` (daily)    | scrape interval                      |
+| `FORMATS`         | `standard,pioneer` | comma-separated slugs to rank      |
 | `LOG_LEVEL`       | `info`           | `debug`, `info`, `warn`, `error`     |
+
+Supported format slugs: `standard`, `pioneer`, `modern`, `pauper`, `legacy`.
 
 ## License
 

@@ -94,8 +94,14 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 		s.Logger.Error("scheduler: store swap failed", "err", err)
 		return
 	}
+	totalCards := 0
+	formatSlugs := make([]string, 0, len(ds.Formats))
+	for slug, fr := range ds.Formats {
+		totalCards += len(fr.Cards)
+		formatSlugs = append(formatSlugs, slug)
+	}
 	s.Logger.Info("scheduler: dataset updated",
-		"cards", len(ds.Cards),
-		"archetypes", len(ds.Archetypes),
+		"formats", formatSlugs,
+		"total_cards", totalCards,
 		"generated_at", ds.GeneratedAt.Format(time.RFC3339))
 }

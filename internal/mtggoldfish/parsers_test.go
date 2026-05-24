@@ -6,111 +6,132 @@ import (
 	"testing"
 )
 
-func TestParseMeta_RealFixture(t *testing.T) {
-	html := mustReadFixture(t, "meta_sample.html")
-	archs, err := ParseMeta(html, "https://www.mtggoldfish.com")
+func TestParseTournaments_RealFixture(t *testing.T) {
+	html := mustReadFixture(t, "tournaments_standard.html")
+	events, err := ParseTournaments(html, "https://www.mtggoldfish.com")
 	if err != nil {
-		t.Fatalf("ParseMeta: %v", err)
+		t.Fatalf("ParseTournaments: %v", err)
 	}
-	if len(archs) < 5 {
-		t.Fatalf("expected >= 5 archetypes, got %d", len(archs))
+	if len(events) < 3 {
+		t.Fatalf("expected >= 3 non-League events, got %d", len(events))
 	}
 
-	// Sanity checks on the first archetype.
-	a := archs[0]
-	if a.Name == "" {
-		t.Errorf("first archetype has empty Name")
+	// No League events should slip through.
+	for _, e := range events {
+		if isLeagueTitle(e.Title) {
+			t.Errorf("league event leaked into output: %q", e.Title)
+		}
 	}
+
+	// First event sanity checks.
+	a := events[0]
 	if a.URL == "" || a.URL[:8] != "https://" {
-		t.Errorf("first archetype URL not absolute: %q", a.URL)
+		t.Errorf("URL not absolute: %q", a.URL)
 	}
-	if a.MetasharePct <= 0 || a.MetasharePct > 100 {
-		t.Errorf("first archetype metashare out of range: %v", a.MetasharePct)
+	if len(a.Standings) == 0 {
+		t.Errorf("first event has no standings")
 	}
-
-	// Metashares should sum to a plausible range (won't be exactly 100 because
-	// long-tail archetypes may be omitted, but should be at least 50).
-	var sum float64
-	for _, a := range archs {
-		sum += a.MetasharePct
-	}
-	if sum < 50 || sum > 150 {
-		t.Errorf("sum of metashares unlikely: %v across %d archetypes", sum, len(archs))
+	for _, s := range a.Standings {
+		if s.DeckID == "" {
+			t.Errorf("standing missing deck ID: %+v", s)
+		}
+		if s.Archetype == "" {
+			t.Errorf("standing missing archetype: %+v", s)
+		}
+		if !filepathLike(s.DeckURL, "/deck/visual/") {
+			t.Errorf("deck URL not in visual form: %q", s.DeckURL)
+		}
 	}
 }
 
-func TestParseArchetype_RealFixture(t *testing.T) {
-	html := mustReadFixture(t, "archetype_sample.html")
-	entries, err := ParseArchetype(html)
+func TestParseDeckVisual_RealFixture(t *testing.T) {
+	html := mustReadFixture(t, "deck_visual.html")
+	cards, err := ParseDeckVisual(html)
 	if err != nil {
-		t.Fatalf("ParseArchetype: %v", err)
+		t.Fatalf("ParseDeckVisual: %v", err)
 	}
-	if len(entries) < 10 {
-		t.Fatalf("expected >= 10 breakdown entries, got %d", len(entries))
-	}
-
-	// No empty names, and no obviously bogus values.
-	for _, e := range entries {
-		if e.CardName == "" {
-			t.Errorf("breakdown entry has empty CardName")
-		}
-		// Land entries can be much higher (Forest @ 7.4); cap generously.
-		if e.AvgCopies <= 0 || e.AvgCopies > 12 {
-			t.Errorf("AvgCopies out of range for %q: %v", e.CardName, e.AvgCopies)
-		}
-		if e.InclusionPct <= 0 || e.InclusionPct > 100 {
-			t.Errorf("InclusionPct out of range for %q: %v", e.CardName, e.InclusionPct)
-		}
+	if len(cards) < 10 {
+		t.Fatalf("expected >= 10 unique cards, got %d", len(cards))
 	}
 
-	// "Sideboard" cards must be excluded. The fixture has a sideboard entry for
-	// "Sheltered by Ghosts" but no mainboard one. Make sure it doesn't appear.
-	for _, e := range entries {
-		if e.CardName == "Sheltered by Ghosts" {
-			t.Errorf("sideboard card %q leaked into mainboard breakdown", e.CardName)
+	// Mainboard quantities should sum to ~60 for a Standard deck. Allow some
+	// slack for split-card oddities or visual rendering quirks.
+	total := 0
+	for _, c := range cards {
+		if c.Quantity <= 0 || c.Quantity > 4 {
+			// Lands legally exceed 4; tighten only the upper-cap.
+			if c.Quantity > 20 {
+				t.Errorf("implausible quantity for %q: %d", c.Name, c.Quantity)
+			}
 		}
+		total += c.Quantity
+	}
+	if total < 40 || total > 100 {
+		t.Errorf("total mainboard quantity %d is far from 60", total)
 	}
 }
 
-func TestParseBreakdownText(t *testing.T) {
-	cases := []struct {
-		in       string
-		wantAvg  float64
-		wantIncl float64
-		wantOK   bool
-	}{
-		{"4.0 in 100% of decks", 4.0, 100, true},
-		{"3.9 in 98% of decks", 3.9, 98, true},
-		{"  2.0 in 92% of decks  ", 2.0, 92, true},
-		{"no numbers here", 0, 0, false},
-		{"", 0, 0, false},
-	}
-	for _, c := range cases {
-		avg, incl, ok := parseBreakdownText(c.in)
-		if ok != c.wantOK || avg != c.wantAvg || incl != c.wantIncl {
-			t.Errorf("parseBreakdownText(%q) = (%v, %v, %v), want (%v, %v, %v)",
-				c.in, avg, incl, ok, c.wantAvg, c.wantIncl, c.wantOK)
-		}
-	}
-}
-
-func TestExtractPercent(t *testing.T) {
+func TestIsLeagueTitle(t *testing.T) {
 	cases := []struct {
 		in   string
-		want float64
+		want bool
 	}{
-		{"11.9%", 11.9},
-		{"11.9%\n(630)", 11.9},
-		{"  4 %", 4},
-		{"no percent", 0},
-		{"", 0},
+		{"Standard League 2026-05-24", true},
+		{"Modern League 2026-05-24", true},
+		{"Standard Challenge 32 2026-05-23", false},
+		{"MTG SEA Championship Final", false},
+		{"League event banner", true},
 	}
 	for _, c := range cases {
-		got := extractPercent(c.in)
-		if got != c.want {
-			t.Errorf("extractPercent(%q) = %v, want %v", c.in, got, c.want)
+		if got := isLeagueTitle(c.in); got != c.want {
+			t.Errorf("isLeagueTitle(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
+}
+
+func TestParseStarTier(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"1 stars", 1},
+		{"3 stars", 3},
+		{"0 stars", 0},
+		{"", 0},
+		{"garbage", 0},
+		{"100 stars", 5}, // clamp
+	}
+	for _, c := range cases {
+		if got := parseStarTier(c.in); got != c.want {
+			t.Errorf("parseStarTier(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestExtractDeckID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"/deck/7799236#online", "7799236"},
+		{"/deck/visual/7799236", "7799236"},
+		{"https://www.mtggoldfish.com/deck/123", "123"},
+		{"/archetype/standard", ""},
+	}
+	for _, c := range cases {
+		if got := extractDeckID(c.in); got != c.want {
+			t.Errorf("extractDeckID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func filepathLike(s, want string) bool {
+	for i := 0; i+len(want) <= len(s); i++ {
+		if s[i:i+len(want)] == want {
+			return true
+		}
+	}
+	return false
 }
 
 func mustReadFixture(t *testing.T, name string) []byte {

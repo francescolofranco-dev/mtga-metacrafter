@@ -2,6 +2,7 @@ package score
 
 import (
 	"math"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -10,81 +11,82 @@ import (
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scryfall"
 )
 
-// MinArchetypeShareForCopies is the metashare threshold below which an
-// archetype's votes don't influence "recommended copies". A 1-of in a 2%
-// rogue deck shouldn't pull a 4-of-in-an-18%-deck recommendation down.
-const MinArchetypeShareForCopies = 3.0
+const (
+	// MaxResults caps the per-format output. Long lists are noise — we hold
+	// the actually-craftable shortlist.
+	MaxResults = 30
 
-// MinInclusionForDeckList is the per-archetype inclusion threshold for
-// listing a card under that archetype's "decks playing it" section. Cards
-// played in <20% of an archetype's lists are too peripheral to feature.
-const MinInclusionForDeckList = 20.0
+	// MinAppearancesToInclude drops one-off cards that showed up in a single
+	// deck — likely techs or experiments rather than crafted staples.
+	MinAppearancesToInclude = 2
 
-// MaxResults caps the output to the top N cards by score.
-const MaxResults = 100
+	// MaxArchetypesToShow caps the per-card archetype list rendered in the
+	// "decks playing it" cell.
+	MaxArchetypesToShow = 5
+)
 
-// Compute builds the ranked recommendation list.
-//
-// Scoring (each archetype contributes additively):
-//
-//	score(c) = Σ_archetype (metashare_pct × inclusion_pct × avg_copies / 100)
-//
-// Both percentages are on a 0–100 scale. A 4-of with 100% inclusion in a 20%
-// meta deck contributes 20 × 100 × 4 / 100 = 80 points. A 1-of with 30%
-// inclusion in a 5% deck contributes 5 × 30 × 1 / 100 = 1.5 points.
-//
-// breakdowns is keyed by archetype URL.
-func Compute(
-	archetypes []mtggoldfish.Archetype,
-	breakdowns map[string][]mtggoldfish.BreakdownEntry,
-	cards *scryfall.Index,
-) []*model.CardRecommendation {
+// DeckRecord ties a parsed decklist to its tournament context.
+type DeckRecord struct {
+	Event     *mtggoldfish.TournamentEvent
+	Archetype string
+	Cards     []mtggoldfish.DeckCard
+}
 
+// Compute ranks cards across all submitted decks.
+//
+// Scoring:
+//
+//	weight(event) = event.StarTier + 1            // 0 stars → 1, 3 stars → 4
+//	score(card)   = Σ_deck (copies × weight)
+//
+// Recommended copies = highest copy count seen for that card in any single
+// deck, clamped to 1–4.
+func Compute(decks []*DeckRecord, cards *scryfall.Index) []*model.CardRecommendation {
 	type agg struct {
-		card  *scryfall.Card
-		score float64
-		votes []copyVote
-		decks []*model.DeckRef
+		card            *scryfall.Card
+		score           float64
+		appearances     int
+		maxCopies       int
+		archetypeCount  map[string]int
+		archetypeCopies map[string]int
 	}
 	aggs := map[string]*agg{}
 
-	for _, a := range archetypes {
-		for _, e := range breakdowns[a.URL] {
-			card, ok := cards.Lookup(e.CardName)
+	for _, rec := range decks {
+		w := tierWeight(rec.Event)
+		for _, dc := range rec.Cards {
+			card, ok := cards.Lookup(dc.Name)
 			if !ok {
-				continue // typos, non-Standard, etc.
+				continue
 			}
 			if isBasicLand(card.TypeLine) {
-				continue // basic lands are free in MTGA
+				continue
 			}
-
 			key := strings.ToLower(card.Name)
 			cur := aggs[key]
 			if cur == nil {
-				cur = &agg{card: card}
+				cur = &agg{
+					card:            card,
+					archetypeCount:  map[string]int{},
+					archetypeCopies: map[string]int{},
+				}
 				aggs[key] = cur
 			}
-
-			cur.score += a.MetasharePct * e.InclusionPct * e.AvgCopies / 100
-			cur.votes = append(cur.votes, copyVote{shareDeck: a.MetasharePct, avg: e.AvgCopies})
-
-			if e.InclusionPct >= MinInclusionForDeckList {
-				cur.decks = append(cur.decks, &model.DeckRef{
-					ArchetypeName: a.Name,
-					ArchetypeURL:  a.URL,
-					MetasharePct:  a.MetasharePct,
-					AvgCopies:     e.AvgCopies,
-					InclusionPct:  e.InclusionPct,
-				})
+			cur.score += float64(dc.Quantity) * float64(w)
+			cur.appearances++
+			if dc.Quantity > cur.maxCopies {
+				cur.maxCopies = dc.Quantity
 			}
+			cur.archetypeCount[rec.Archetype]++
+			cur.archetypeCopies[rec.Archetype] += dc.Quantity
 		}
 	}
 
 	out := make([]*model.CardRecommendation, 0, len(aggs))
 	for _, a := range aggs {
-		sort.SliceStable(a.decks, func(i, j int) bool {
-			return a.decks[i].MetasharePct > a.decks[j].MetasharePct
-		})
+		if a.appearances < MinAppearancesToInclude {
+			continue
+		}
 		out = append(out, &model.CardRecommendation{
 			Name:              a.card.Name,
 			Rarity:            a.card.Rarity,
@@ -93,9 +95,11 @@ func Compute(
 			TypeLine:          a.card.TypeLine,
 			Set:               a.card.Set,
 			ImageURI:          a.card.ImageURI,
+			ScryfallURL:       buildScryfallURL(a.card.Name),
 			Score:             round2(a.score),
-			RecommendedCopies: recommendedCopies(a.votes),
-			Decks:             a.decks,
+			RecommendedCopies: clampCopies(a.maxCopies),
+			DeckAppearances:   a.appearances,
+			Archetypes:        topArchetypes(a.archetypeCount, a.archetypeCopies),
 		})
 	}
 
@@ -105,44 +109,47 @@ func Compute(
 		}
 		return out[i].Name < out[j].Name
 	})
-
 	if len(out) > MaxResults {
 		out = out[:MaxResults]
 	}
 	return out
 }
 
-type copyVote struct {
-	shareDeck float64 // metashare of the archetype
-	avg       float64 // avg copies in that archetype
+// AnnotateCrossFormat sets CardRecommendation.AlsoIn on every card based on
+// whether the same card name also appears in the top-N of other formats.
+func AnnotateCrossFormat(rankings map[string]*model.FormatRanking) {
+	formatCards := map[string]map[string]bool{}
+	for slug, r := range rankings {
+		set := make(map[string]bool, len(r.Cards))
+		for _, c := range r.Cards {
+			set[strings.ToLower(c.Name)] = true
+		}
+		formatCards[slug] = set
+	}
+
+	for slug, r := range rankings {
+		for _, c := range r.Cards {
+			key := strings.ToLower(c.Name)
+			var also []string
+			for otherSlug, set := range formatCards {
+				if otherSlug == slug {
+					continue
+				}
+				if set[key] {
+					also = append(also, otherSlug)
+				}
+			}
+			sort.Strings(also)
+			c.AlsoIn = also
+		}
+	}
 }
 
-func recommendedCopies(votes []copyVote) int {
-	max := 0.0
-	found := false
-	for _, v := range votes {
-		if v.shareDeck < MinArchetypeShareForCopies {
-			continue
-		}
-		if v.avg > max {
-			max = v.avg
-			found = true
-		}
+func tierWeight(e *mtggoldfish.TournamentEvent) int {
+	if e == nil {
+		return 1
 	}
-	if !found {
-		for _, v := range votes {
-			if v.avg > max {
-				max = v.avg
-			}
-		}
-	}
-	r := int(math.Round(max))
-	if r < 1 {
-		r = 1
-	} else if r > 4 {
-		r = 4
-	}
-	return r
+	return e.StarTier + 1
 }
 
 func isBasicLand(typeLine string) bool {
@@ -150,6 +157,51 @@ func isBasicLand(typeLine string) bool {
 	return strings.Contains(low, "basic") && strings.Contains(low, "land")
 }
 
+func clampCopies(n int) int {
+	switch {
+	case n < 1:
+		return 1
+	case n > 4:
+		return 4
+	default:
+		return n
+	}
+}
+
 func round2(f float64) float64 {
 	return math.Round(f*100) / 100
+}
+
+func topArchetypes(counts, copies map[string]int) []*model.ArchetypeRef {
+	refs := make([]*model.ArchetypeRef, 0, len(counts))
+	for name, c := range counts {
+		cp := copies[name]
+		avg := 0.0
+		if c > 0 {
+			avg = float64(cp) / float64(c)
+		}
+		refs = append(refs, &model.ArchetypeRef{
+			Name:      name,
+			DeckCount: c,
+			AvgCopies: math.Round(avg*10) / 10,
+		})
+	}
+	sort.SliceStable(refs, func(i, j int) bool {
+		if refs[i].DeckCount != refs[j].DeckCount {
+			return refs[i].DeckCount > refs[j].DeckCount
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	if len(refs) > MaxArchetypesToShow {
+		refs = refs[:MaxArchetypesToShow]
+	}
+	return refs
+}
+
+// buildScryfallURL returns a Scryfall search URL that lands on the exact card.
+// We URL-encode the whole `!"<name>"` query so quotes, commas, apostrophes,
+// and the "//" in split-card names round-trip correctly.
+func buildScryfallURL(name string) string {
+	q := `!"` + name + `"`
+	return "https://scryfall.com/search?q=" + url.QueryEscape(q)
 }

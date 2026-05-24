@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/model"
+	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtggoldfish"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scheduler"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/store"
 )
@@ -27,21 +28,30 @@ type Server struct {
 	Scheduler  *scheduler.Scheduler
 	Logger     *slog.Logger
 	AdminToken string
+	// EnabledFormats is the list shown in the format selector, in display order.
+	EnabledFormats []mtggoldfish.FormatSpec
 
 	tmpl *template.Template
 }
 
-func New(st *store.Store, sched *scheduler.Scheduler, logger *slog.Logger, adminToken string) (*Server, error) {
+func New(
+	st *store.Store,
+	sched *scheduler.Scheduler,
+	logger *slog.Logger,
+	adminToken string,
+	enabledFormats []mtggoldfish.FormatSpec,
+) (*Server, error) {
 	tmpl, err := template.New("").Funcs(funcMap()).ParseFS(templateFS, "templates/*.html.tmpl")
 	if err != nil {
 		return nil, fmt.Errorf("server: parse templates: %w", err)
 	}
 	return &Server{
-		Store:      st,
-		Scheduler:  sched,
-		Logger:     logger,
-		AdminToken: adminToken,
-		tmpl:       tmpl,
+		Store:          st,
+		Scheduler:      sched,
+		Logger:         logger,
+		AdminToken:     adminToken,
+		EnabledFormats: enabledFormats,
+		tmpl:           tmpl,
 	}, nil
 }
 
@@ -60,16 +70,28 @@ func (s *Server) Handler() http.Handler {
 }
 
 type viewData struct {
-	Dataset *model.Dataset
-	Rows    []*model.CardRecommendation
-	Query   string
-	Sort    string
+	Dataset        *model.Dataset
+	Format         *model.FormatRanking // resolved active format (may be nil)
+	FormatSlug     string               // active slug
+	EnabledFormats []mtggoldfish.FormatSpec
+	Rows           []*model.CardRecommendation
+	Query          string
+	Sort           string
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	slug := s.resolveFormat(r.URL.Query().Get("format"))
 	ds := s.Store.Get()
-	rows := filterAndSort(ds, "", "score")
-	s.render(w, "page", viewData{Dataset: ds, Rows: rows, Sort: "score"})
+	format := s.formatRanking(ds, slug)
+	rows := filterAndSort(format, "", "score")
+	s.render(w, "page", viewData{
+		Dataset:        ds,
+		Format:         format,
+		FormatSlug:     slug,
+		EnabledFormats: s.EnabledFormats,
+		Rows:           rows,
+		Sort:           "score",
+	})
 }
 
 func (s *Server) handleRows(w http.ResponseWriter, r *http.Request) {
@@ -78,9 +100,19 @@ func (s *Server) handleRows(w http.ResponseWriter, r *http.Request) {
 	if sortKey == "" {
 		sortKey = "score"
 	}
+	slug := s.resolveFormat(r.URL.Query().Get("format"))
 	ds := s.Store.Get()
-	rows := filterAndSort(ds, q, sortKey)
-	s.render(w, "rows", viewData{Dataset: ds, Rows: rows, Query: q, Sort: sortKey})
+	format := s.formatRanking(ds, slug)
+	rows := filterAndSort(format, q, sortKey)
+	s.render(w, "rows", viewData{
+		Dataset:        ds,
+		Format:         format,
+		FormatSlug:     slug,
+		EnabledFormats: s.EnabledFormats,
+		Rows:           rows,
+		Query:          q,
+		Sort:           sortKey,
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -106,6 +138,28 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// resolveFormat picks an enabled format slug. Defaults to the first enabled
+// format if the query value is empty or unknown.
+func (s *Server) resolveFormat(req string) string {
+	req = strings.ToLower(strings.TrimSpace(req))
+	for _, f := range s.EnabledFormats {
+		if f.Slug == req {
+			return req
+		}
+	}
+	if len(s.EnabledFormats) > 0 {
+		return s.EnabledFormats[0].Slug
+	}
+	return "standard"
+}
+
+func (s *Server) formatRanking(ds *model.Dataset, slug string) *model.FormatRanking {
+	if ds == nil || ds.Formats == nil {
+		return nil
+	}
+	return ds.Formats[slug]
+}
+
 func (s *Server) render(w http.ResponseWriter, name string, data viewData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
@@ -118,16 +172,25 @@ func funcMap() template.FuncMap {
 		"add":   func(a, b int) int { return a + b },
 		"lower": strings.ToLower,
 		"trim":  strings.TrimSpace,
+		"displayFormat": func(slug string) string {
+			if f, ok := mtggoldfish.FormatBySlug(slug); ok {
+				return f.DisplayName
+			}
+			if slug == "" {
+				return ""
+			}
+			return strings.ToUpper(slug[:1]) + slug[1:]
+		},
 	}
 }
 
-func filterAndSort(ds *model.Dataset, q, sortKey string) []*model.CardRecommendation {
-	if ds == nil {
+func filterAndSort(format *model.FormatRanking, q, sortKey string) []*model.CardRecommendation {
+	if format == nil {
 		return nil
 	}
 	q = strings.ToLower(strings.TrimSpace(q))
-	out := make([]*model.CardRecommendation, 0, len(ds.Cards))
-	for _, c := range ds.Cards {
+	out := make([]*model.CardRecommendation, 0, len(format.Cards))
+	for _, c := range format.Cards {
 		if q != "" && !strings.Contains(strings.ToLower(c.Name), q) {
 			continue
 		}
@@ -161,14 +224,7 @@ func sortCards(cs []*model.CardRecommendation, key string) {
 			}
 			return cs[i].Score > cs[j].Score
 		})
-	case "copies":
-		sort.SliceStable(cs, func(i, j int) bool {
-			if cs[i].RecommendedCopies != cs[j].RecommendedCopies {
-				return cs[i].RecommendedCopies > cs[j].RecommendedCopies
-			}
-			return cs[i].Score > cs[j].Score
-		})
-	default:
+	default: // score
 		sort.SliceStable(cs, func(i, j int) bool {
 			if cs[i].Score != cs[j].Score {
 				return cs[i].Score > cs[j].Score

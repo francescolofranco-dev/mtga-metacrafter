@@ -34,23 +34,24 @@ func NewClient(logger *slog.Logger) *Client {
 	}
 }
 
-// FetchStandardLegal returns every oracle card currently legal in Standard.
-func (c *Client) FetchStandardLegal(ctx context.Context) ([]*Card, error) {
+// FetchLegalInAny returns every oracle card that is legal in at least one
+// of the listed formats (e.g. "standard", "pioneer", "modern").
+func (c *Client) FetchLegalInAny(ctx context.Context, formats []string) ([]*Card, error) {
 	t0 := time.Now()
 
 	bulkURL, err := c.findBulkURL(ctx, "oracle_cards")
 	if err != nil {
 		return nil, fmt.Errorf("scryfall bulk metadata: %w", err)
 	}
-	c.Logger.Info("scryfall bulk url resolved", "type", "oracle_cards", "url", bulkURL)
+	c.Logger.Info("scryfall bulk url resolved", "type", "oracle_cards", "url", bulkURL, "formats", formats)
 
-	cards, total, err := c.fetchStandardFromBulk(ctx, bulkURL)
+	cards, total, err := c.fetchLegalFromBulk(ctx, bulkURL, formats)
 	if err != nil {
 		return nil, err
 	}
 	c.Logger.Info("scryfall fetch complete",
 		"cards_total", total,
-		"cards_standard", len(cards),
+		"cards_kept", len(cards),
 		"elapsed", time.Since(t0).String())
 	return cards, nil
 }
@@ -110,9 +111,9 @@ type rawCardFace struct {
 	ImageURIs map[string]string `json:"image_uris"`
 }
 
-// fetchStandardFromBulk stream-decodes the oracle_cards JSON array, keeping
-// only Standard-legal cards. Returns (kept, total_seen, error).
-func (c *Client) fetchStandardFromBulk(ctx context.Context, url string) ([]*Card, int, error) {
+// fetchLegalFromBulk stream-decodes the oracle_cards JSON array, keeping
+// cards legal in at least one of the listed formats. Returns (kept, total_seen, error).
+func (c *Client) fetchLegalFromBulk(ctx context.Context, url string, formats []string) ([]*Card, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, err
@@ -146,12 +147,21 @@ func (c *Client) fetchStandardFromBulk(ctx context.Context, url string) ([]*Card
 			return nil, total, fmt.Errorf("decode card %d: %w", total, err)
 		}
 		total++
-		if r.Legalities["standard"] != "legal" {
+		if !legalInAny(r.Legalities, formats) {
 			continue
 		}
 		out = append(out, convert(r))
 	}
 	return out, total, nil
+}
+
+func legalInAny(legalities map[string]string, formats []string) bool {
+	for _, f := range formats {
+		if legalities[f] == "legal" {
+			return true
+		}
+	}
+	return false
 }
 
 func convert(r rawCard) *Card {

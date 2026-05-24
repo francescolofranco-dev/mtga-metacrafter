@@ -10,7 +10,8 @@ primary_region = "fra"
 [env]
   LISTEN_ADDR = ":8080"
   DATA_DIR = "/data"
-  REFRESH_PERIOD = "168h"
+  REFRESH_PERIOD = "24h"
+  FORMATS = "standard,pioneer"
   LOG_LEVEL = "info"
 
 [[mounts]]

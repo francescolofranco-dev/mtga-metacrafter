@@ -2,37 +2,55 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MTGA MetaCrafter — what to craft for MTG Arena Standard</title>
-<meta name="description" content="Cards most worth crafting in the current MTG Arena Standard meta.">
+<title>MTGA MetaCrafter — what to craft, by tournament results</title>
+<meta name="description" content="Cards most worth crafting in MTG Arena, ranked by recent tournament top finishes.">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="MTGA MetaCrafter — what to craft, by tournament results">
+<meta property="og:description" content="Cards most worth crafting in MTG Arena, ranked by recent tournament top finishes.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://mtga-metacrafter.fly.dev/">
+<meta name="twitter:card" content="summary">
 <link rel="stylesheet" href="/static/app.css">
 <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
 <body>
 <header>
-  <h1>MTGA MetaCrafter</h1>
-  <p class="tagline">What to craft for MTG Arena Standard, ranked by the current meta.</p>
-  {{with .Dataset}}
-    <p class="stamp">Data as of {{.GeneratedAt.Format "2006-01-02"}} · {{.SourceLabel}}</p>
+  <div class="header-row">
+    <div>
+      <h1>MTGA MetaCrafter</h1>
+      <p class="tagline">Cards worth crafting, ranked by appearances in recent tournament top finishes.</p>
+    </div>
+    <button id="share-btn" class="share-btn" type="button" title="Share this page">Share</button>
+  </div>
+  {{with .Format}}
+    <p class="stamp">{{displayFormat .Slug}} · data as of {{.GeneratedAt.Format "2006-01-02"}} · {{.DeckCount}} decks across {{len .Tournaments}} tournaments</p>
   {{else}}
-    <p class="stamp warn">No data yet. The first scrape is still running — refresh in a minute.</p>
+    <p class="stamp warn">No data yet for this format. The first scrape is still running — refresh in a minute.</p>
   {{end}}
 </header>
 
 <section class="controls">
+  <label class="control-label format-label">Format
+    <select name="format"
+            hx-get="/rows" hx-trigger="change" hx-target="#rows" hx-include="[name='q'],[name='sort']"
+            hx-swap="innerHTML"
+            hx-on::after-request="updateFormatInURL(this.value)">
+      {{range .EnabledFormats}}
+        <option value="{{.Slug}}" {{if eq .Slug $.FormatSlug}}selected{{end}}>{{.DisplayName}}</option>
+      {{end}}
+    </select>
+  </label>
   <input type="search" id="filter" name="q" placeholder="Filter by card name…" autocomplete="off"
          value="{{.Query}}"
          hx-get="/rows" hx-trigger="input changed delay:150ms, search"
-         hx-target="#rows" hx-include="[name='sort']" hx-swap="innerHTML"
-         hx-push-url="false">
-  <label class="sort">Sort
+         hx-target="#rows" hx-include="[name='sort'],[name='format']" hx-swap="innerHTML">
+  <label class="control-label sort-label">Sort
     <select name="sort"
-            hx-get="/rows" hx-trigger="change" hx-target="#rows" hx-include="[name='q']"
+            hx-get="/rows" hx-trigger="change" hx-target="#rows" hx-include="[name='q'],[name='format']"
             hx-swap="innerHTML">
       <option value="score"  {{if eq .Sort "score"}}selected{{end}}>Score (default)</option>
       <option value="name"   {{if eq .Sort "name"}}selected{{end}}>Name (A→Z)</option>
       <option value="rarity" {{if eq .Sort "rarity"}}selected{{end}}>Rarity (mythic first)</option>
-      <option value="copies" {{if eq .Sort "copies"}}selected{{end}}>Recommended copies</option>
     </select>
   </label>
 </section>
@@ -42,10 +60,11 @@
     <tr>
       <th class="num">#</th>
       <th class="name">Card</th>
-      <th class="rarity">Wildcard</th>
+      <th class="type">Type</th>
+      <th class="rarity">WC</th>
       <th class="copies">Copies</th>
       <th class="score">Score</th>
-      <th class="decks">Decks playing it</th>
+      <th class="decks">Decks &amp; archetypes</th>
     </tr>
   </thead>
   <tbody id="rows">
@@ -55,8 +74,37 @@
 
 <footer>
   <p>Open-source on <a href="https://github.com/francescolofranco-dev/mtga-metacrafter">GitHub</a>. MIT licensed.</p>
-  <p class="fine">Meta data scraped weekly from <a href="https://www.mtggoldfish.com/" rel="noopener">MTGGoldfish</a>; card data from <a href="https://scryfall.com/" rel="noopener">Scryfall</a>. We aim to be a polite citizen — see the README.</p>
+  <p class="fine">Card data: <a href="https://scryfall.com/" rel="noopener">Scryfall</a> · Tournament data: <a href="https://www.mtggoldfish.com/" rel="noopener">MTGGoldfish</a>. Refreshed daily. MTGO leagues are excluded; only real tournaments count.</p>
 </footer>
+
+<script>
+(function () {
+  const btn = document.getElementById('share-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const url = window.location.href;
+    const title = 'MTGA MetaCrafter — what to craft';
+    if (navigator.share) {
+      try { await navigator.share({title, url}); return; } catch (_) {}
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      const orig = btn.textContent;
+      btn.textContent = 'Link copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    } catch (_) {
+      window.prompt('Copy this URL:', url);
+    }
+  });
+
+  // Persist the selected format in the URL so the share button captures it.
+  window.updateFormatInURL = function (slug) {
+    const u = new URL(window.location.href);
+    u.searchParams.set('format', slug);
+    history.replaceState(null, '', u.toString());
+  };
+})();
+</script>
 </body>
 </html>{{end}}
 
@@ -67,17 +115,25 @@
 <tr data-name="{{lower $c.Name}}">
   <td class="num">{{add $i 1}}</td>
   <td class="name">
-    <a href="https://scryfall.com/search?q=%21%22{{$c.Name}}%22" target="_blank" rel="noopener">{{$c.Name}}</a>
-    {{if $c.ManaCost}}<span class="mana">{{$c.ManaCost}}</span>{{end}}
+    <span class="card-cell">
+      <a href="{{$c.ScryfallURL}}" target="_blank" rel="noopener">{{$c.Name}}</a>
+      {{if $c.ImageURI}}<img class="card-preview" src="{{$c.ImageURI}}" alt="" loading="lazy" decoding="async">{{end}}
+    </span>
+    {{if $c.AlsoIn}}
+      <span class="also-in" title="Also in top {{$c.AlsoIn | len}} format{{if gt (len $c.AlsoIn) 1}}s{{end}}">
+        {{range $j, $f := $c.AlsoIn}}{{if $j}} · {{end}}+{{displayFormat $f}}{{end}}
+      </span>
+    {{end}}
   </td>
+  <td class="type">{{$c.TypeLine}}</td>
   <td class="rarity wc-{{$c.Wildcard}}" title="{{$c.Rarity}}">{{$c.Wildcard}}</td>
   <td class="copies">{{$c.RecommendedCopies}}</td>
-  <td class="score">{{printf "%.1f" $c.Score}}</td>
+  <td class="score" title="Score = Σ (copies × tier_weight). {{$c.DeckAppearances}} deck{{if gt $c.DeckAppearances 1}}s{{end}}.">{{printf "%.0f" $c.Score}}</td>
   <td class="decks">
-    {{range $j, $d := $c.Decks}}{{if $j}}, {{end}}<a href="{{$d.ArchetypeURL}}" target="_blank" rel="noopener" title="{{printf "%.1f" $d.AvgCopies}} copies in {{printf "%.0f" $d.InclusionPct}}% of decks ({{printf "%.1f" $d.MetasharePct}}% meta)">{{$d.ArchetypeName}}</a>{{end}}
+    {{range $j, $a := $c.Archetypes}}{{if $j}}, {{end}}<span title="{{$a.DeckCount}} deck{{if gt $a.DeckCount 1}}s{{end}}, avg {{printf "%.1f" $a.AvgCopies}} copies">{{$a.Name}} <span class="archetype-count">×{{$a.DeckCount}}</span></span>{{end}}
   </td>
 </tr>
 {{else}}
-<tr><td colspan="6" class="empty">No cards match.</td></tr>
+<tr><td colspan="7" class="empty">No cards match.</td></tr>
 {{end}}
 {{end}}

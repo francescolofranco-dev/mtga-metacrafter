@@ -1,16 +1,58 @@
 package mtggoldfish
 
-// Archetype is a single row on the Standard metagame page.
-type Archetype struct {
-	Name         string
-	MetasharePct float64 // 0-100 scale, e.g. 11.9 for 11.9%
-	URL          string  // absolute URL to the archetype/decklist page
+import "time"
+
+// TournamentEvent is one event listed on /tournaments/<format>.
+type TournamentEvent struct {
+	Title     string
+	URL       string // /tournament/<id>
+	Date      time.Time
+	StarTier  int           // 0-3, MTGGoldfish star rating (0 = unrated)
+	Standings []DeckStanding // listed finishers
 }
 
-// BreakdownEntry is one card listed in an archetype's "Card Breakdown" section.
-// Sideboard entries are intentionally excluded by the parser.
-type BreakdownEntry struct {
-	CardName     string
-	AvgCopies    float64 // average copies in decks of this archetype, e.g. 3.9
-	InclusionPct float64 // % of decks of this archetype that play it, e.g. 98
+// DeckStanding is one row in a tournament's standings table.
+type DeckStanding struct {
+	Place     string // "1st", "5-8", "5 - 0", etc. (raw text)
+	Archetype string // archetype label (e.g. "Izzet Phoenix", "UB")
+	DeckURL   string // /deck/<id>
+	DeckID    string // numeric ID parsed out of the URL
+}
+
+// DeckCards is the parsed mainboard for a single deck from /deck/visual/<id>.
+type DeckCards struct {
+	DeckURL string
+	Cards   []DeckCard // one entry per unique card with quantity
+}
+
+// DeckCard is one mainboard card with its quantity.
+type DeckCard struct {
+	Name     string
+	Quantity int
+}
+
+// FormatSpec describes one format we scrape.
+type FormatSpec struct {
+	Slug        string // URL path piece: "standard", "pioneer", ...
+	DisplayName string // "Standard", "Pioneer", ...
+}
+
+// SupportedFormats enumerates the formats we know how to scrape.
+// The slug must match MTGGoldfish's /tournaments/<slug> URL.
+var SupportedFormats = []FormatSpec{
+	{Slug: "standard", DisplayName: "Standard"},
+	{Slug: "pioneer", DisplayName: "Pioneer"},
+	{Slug: "modern", DisplayName: "Modern"},
+	{Slug: "pauper", DisplayName: "Pauper"},
+	{Slug: "legacy", DisplayName: "Legacy"},
+}
+
+// FormatBySlug returns the spec for slug, or false if unknown.
+func FormatBySlug(slug string) (FormatSpec, bool) {
+	for _, f := range SupportedFormats {
+		if f.Slug == slug {
+			return f, true
+		}
+	}
+	return FormatSpec{}, false
 }

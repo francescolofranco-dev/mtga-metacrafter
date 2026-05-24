@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/model"
@@ -17,108 +18,250 @@ import (
 // Callers should keep the previous dataset and try again later.
 var ErrScrapeDegraded = errors.New("pipeline: scrape result failed sanity checks")
 
-// Config controls a single pipeline run.
+// Config controls one pipeline run.
 type Config struct {
 	Scryfall    *scryfall.Client
 	MTGGoldfish *mtggoldfish.Client
 	Logger      *slog.Logger
-	MaxArchetypes int // 0 means "all"
+
+	// Formats to scrape. Each must match an MTGGoldfish /tournaments/<slug> URL.
+	Formats []mtggoldfish.FormatSpec
+
+	// MaxEventsPerFormat caps the most-recent non-League events we'll consider.
+	// Default 5.
+	MaxEventsPerFormat int
+
+	// MaxDecksPerEvent caps the deck-fetches per event (taken from the top of
+	// the standings table). Default 16.
+	MaxDecksPerEvent int
+
+	// MaxEventAgeDays drops events older than this. Default 30.
+	MaxEventAgeDays int
 }
 
-// Run fetches all sources, computes the recommendation list, and returns a
-// Dataset. If the result fails sanity checks, returns ErrScrapeDegraded.
+const (
+	defaultMaxEvents    = 5
+	defaultMaxDecks     = 16
+	defaultMaxAgeDays   = 30
+	minFormatsToSucceed = 1
+)
+
+// Run fetches every configured format, ranks each one, and joins them into a
+// single Dataset. If sanity checks fail, returns ErrScrapeDegraded — callers
+// should keep the previous dataset.
 func Run(ctx context.Context, cfg Config) (*model.Dataset, error) {
+	cfg = cfg.withDefaults()
 	logger := cfg.Logger.With("op", "pipeline.run")
 	t0 := time.Now()
 
-	logger.Info("fetching Scryfall Standard-legal cards")
-	cards, err := cfg.Scryfall.FetchStandardLegal(ctx)
+	if len(cfg.Formats) == 0 {
+		return nil, fmt.Errorf("no formats configured")
+	}
+
+	formatSlugs := make([]string, 0, len(cfg.Formats))
+	for _, f := range cfg.Formats {
+		formatSlugs = append(formatSlugs, f.Slug)
+	}
+
+	logger.Info("fetching Scryfall card data", "formats", formatSlugs)
+	cards, err := cfg.Scryfall.FetchLegalInAny(ctx, formatSlugs)
 	if err != nil {
 		return nil, fmt.Errorf("scryfall: %w", err)
 	}
 	index := scryfall.BuildIndex(cards)
 	logger.Info("scryfall index built", "cards", len(cards), "index_keys", index.Len())
 
-	logger.Info("fetching MTGGoldfish meta")
-	archs, err := cfg.MTGGoldfish.FetchMeta(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("mtggoldfish meta: %w", err)
-	}
-	logger.Info("metagame parsed", "archetypes", len(archs))
+	rankings := map[string]*model.FormatRanking{}
+	totalEvents := 0
+	totalDecks := 0
+	cutoff := time.Now().UTC().AddDate(0, 0, -cfg.MaxEventAgeDays)
 
-	if cfg.MaxArchetypes > 0 && len(archs) > cfg.MaxArchetypes {
-		archs = archs[:cfg.MaxArchetypes]
-	}
-
-	breakdowns := make(map[string][]mtggoldfish.BreakdownEntry, len(archs))
-	missCount := 0
-	for _, a := range archs {
-		entries, err := cfg.MTGGoldfish.FetchArchetype(ctx, a.URL)
+	for _, f := range cfg.Formats {
+		flog := logger.With("format", f.Slug)
+		fr, err := runFormat(ctx, cfg, index, f, cutoff, flog)
 		if err != nil {
-			logger.Warn("archetype fetch failed", "archetype", a.Name, "err", err)
-			missCount++
+			flog.Warn("format scrape failed — skipping", "err", err)
 			continue
 		}
-		breakdowns[a.URL] = entries
-		logger.Debug("archetype parsed", "archetype", a.Name, "entries", len(entries))
+		rankings[f.Slug] = fr
+		totalEvents += len(fr.Tournaments)
+		totalDecks += fr.DeckCount
 	}
 
-	cardRecs := score.Compute(archs, breakdowns, index)
+	score.AnnotateCrossFormat(rankings)
 
 	ds := &model.Dataset{
 		GeneratedAt: time.Now().UTC(),
-		Format:      "Standard",
-		SourceLabel: "MTGGoldfish + Scryfall",
-		Cards:       cardRecs,
-		Archetypes:  toArchetypeRefs(archs),
+		SourceLabel: "MTGGoldfish tournaments + Scryfall",
+		Formats:     rankings,
 	}
 
-	if err := sanityCheck(ds, missCount, len(archs)); err != nil {
+	if err := sanityCheck(ds); err != nil {
 		logger.Warn("scrape degraded — rejecting result",
-			"archetypes", len(archs),
-			"missed_archetype_fetches", missCount,
-			"cards", len(cardRecs),
+			"formats_seen", len(rankings),
+			"total_events", totalEvents,
+			"total_decks", totalDecks,
 			"elapsed", time.Since(t0).String(),
 			"err", err)
 		return ds, fmt.Errorf("%w: %v", ErrScrapeDegraded, err)
 	}
 
 	logger.Info("pipeline complete",
-		"archetypes", len(archs),
-		"cards", len(cardRecs),
+		"formats", len(rankings),
+		"events", totalEvents,
+		"decks", totalDecks,
 		"elapsed", time.Since(t0).String())
 	return ds, nil
 }
 
-func sanityCheck(ds *model.Dataset, archetypeMisses, totalArchetypes int) error {
-	if len(ds.Archetypes) < 5 {
-		return fmt.Errorf("only %d archetypes found", len(ds.Archetypes))
+func runFormat(
+	ctx context.Context,
+	cfg Config,
+	index *scryfall.Index,
+	f mtggoldfish.FormatSpec,
+	cutoff time.Time,
+	logger *slog.Logger,
+) (*model.FormatRanking, error) {
+	logger.Info("fetching tournaments")
+	events, err := cfg.MTGGoldfish.FetchTournaments(ctx, f.Slug)
+	if err != nil {
+		return nil, fmt.Errorf("tournaments: %w", err)
 	}
-	var sumShare float64
-	for _, a := range ds.Archetypes {
-		sumShare += a.MetasharePct
+
+	// Filter by age, sort most-recent-first, cap.
+	filtered := events[:0]
+	for _, e := range events {
+		if !e.Date.IsZero() && e.Date.Before(cutoff) {
+			continue
+		}
+		filtered = append(filtered, e)
 	}
-	if sumShare < 50 || sumShare > 150 {
-		return fmt.Errorf("metashare sum %.1f%% outside [50,150]", sumShare)
+	sort.SliceStable(filtered, func(i, j int) bool {
+		return filtered[i].Date.After(filtered[j].Date)
+	})
+	if len(filtered) > cfg.MaxEventsPerFormat {
+		filtered = filtered[:cfg.MaxEventsPerFormat]
 	}
-	if len(ds.Cards) < 30 {
-		return fmt.Errorf("only %d card recommendations produced", len(ds.Cards))
+	logger.Info("tournaments filtered", "kept", len(filtered), "raw", len(events))
+
+	// Collect unique deck URLs to fetch. Track each deck's tournament context.
+	type planEntry struct {
+		event     *mtggoldfish.TournamentEvent
+		standing  mtggoldfish.DeckStanding
 	}
-	// More than 30% of archetype-detail fetches failing makes the data unreliable.
-	if totalArchetypes > 0 && float64(archetypeMisses)/float64(totalArchetypes) > 0.3 {
-		return fmt.Errorf("too many archetype fetch failures: %d/%d", archetypeMisses, totalArchetypes)
+	seen := map[string]bool{}
+	var plan []planEntry
+	for i := range filtered {
+		ev := &filtered[i]
+		limit := cfg.MaxDecksPerEvent
+		if limit > len(ev.Standings) {
+			limit = len(ev.Standings)
+		}
+		for _, s := range ev.Standings[:limit] {
+			if seen[s.DeckID] {
+				continue
+			}
+			seen[s.DeckID] = true
+			plan = append(plan, planEntry{event: ev, standing: s})
+		}
+	}
+
+	logger.Info("fetching decks", "count", len(plan))
+
+	var records []*score.DeckRecord
+	miss := 0
+	for i, p := range plan {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		deck, err := cfg.MTGGoldfish.FetchDeck(ctx, p.standing.DeckURL)
+		if err != nil {
+			logger.Warn("deck fetch failed",
+				"deck_id", p.standing.DeckID,
+				"event", p.event.Title,
+				"err", err)
+			miss++
+			continue
+		}
+		records = append(records, &score.DeckRecord{
+			Event:     p.event,
+			Archetype: p.standing.Archetype,
+			Cards:     deck.Cards,
+		})
+		if (i+1)%10 == 0 {
+			logger.Debug("deck progress", "fetched", i+1, "total", len(plan))
+		}
+	}
+
+	cardRecs := score.Compute(records, index)
+
+	tourRefs := make([]*model.TournamentRef, 0, len(filtered))
+	for i := range filtered {
+		ev := &filtered[i]
+		used := 0
+		for _, p := range plan {
+			if p.event == ev {
+				used++
+			}
+		}
+		tourRefs = append(tourRefs, &model.TournamentRef{
+			Name:      ev.Title,
+			URL:       ev.URL,
+			Date:      ev.Date,
+			StarTier:  ev.StarTier,
+			DeckCount: used,
+		})
+	}
+
+	if miss > 0 && len(records) == 0 {
+		return nil, fmt.Errorf("all %d deck fetches failed", miss)
+	}
+
+	logger.Info("format ranked",
+		"events", len(filtered),
+		"decks_fetched", len(records),
+		"deck_misses", miss,
+		"cards", len(cardRecs))
+
+	return &model.FormatRanking{
+		Slug:        f.Slug,
+		DisplayName: f.DisplayName,
+		GeneratedAt: time.Now().UTC(),
+		DeckCount:   len(records),
+		Cards:       cardRecs,
+		Tournaments: tourRefs,
+	}, nil
+}
+
+func sanityCheck(ds *model.Dataset) error {
+	if len(ds.Formats) < minFormatsToSucceed {
+		return fmt.Errorf("only %d formats produced rankings", len(ds.Formats))
+	}
+	// At least one format must yield a non-trivial card list.
+	hasContent := false
+	for _, r := range ds.Formats {
+		if len(r.Cards) >= 10 {
+			hasContent = true
+			break
+		}
+	}
+	if !hasContent {
+		return fmt.Errorf("no format reached >= 10 cards")
 	}
 	return nil
 }
 
-func toArchetypeRefs(archs []mtggoldfish.Archetype) []*model.ArchetypeRef {
-	out := make([]*model.ArchetypeRef, 0, len(archs))
-	for _, a := range archs {
-		out = append(out, &model.ArchetypeRef{
-			Name:         a.Name,
-			URL:          a.URL,
-			MetasharePct: a.MetasharePct,
-		})
+func (c Config) withDefaults() Config {
+	if c.MaxEventsPerFormat == 0 {
+		c.MaxEventsPerFormat = defaultMaxEvents
 	}
-	return out
+	if c.MaxDecksPerEvent == 0 {
+		c.MaxDecksPerEvent = defaultMaxDecks
+	}
+	if c.MaxEventAgeDays == 0 {
+		c.MaxEventAgeDays = defaultMaxAgeDays
+	}
+	return c
 }

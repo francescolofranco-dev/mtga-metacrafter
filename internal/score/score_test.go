@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/model"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtggoldfish"
@@ -33,7 +34,7 @@ func TestCompute_BasicScoring(t *testing.T) {
 		}},
 	}
 
-	out := Compute(decks, cards)
+	out := Compute(decks, cards, "standard", time.Now())
 	if len(out) != 2 {
 		t.Fatalf("expected 2 cards, got %d", len(out))
 	}
@@ -69,7 +70,7 @@ func TestCompute_DropsSingleAppearance(t *testing.T) {
 			{Name: "Tech Card", Quantity: 1},
 		}},
 	}
-	out := Compute(decks, cards)
+	out := Compute(decks, cards, "standard", time.Now())
 	if len(out) != 0 {
 		t.Errorf("expected single-deck card dropped, got %d cards", len(out))
 	}
@@ -94,6 +95,90 @@ func TestAnnotateCrossFormat(t *testing.T) {
 	stdMoss := rankings["standard"].Cards[1]
 	if len(stdMoss.AlsoIn) != 0 {
 		t.Errorf("Mossborn should not be also-in anywhere; got %v", stdMoss.AlsoIn)
+	}
+}
+
+func TestStandardRotationFactor(t *testing.T) {
+	now := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		label    string
+		release  time.Time
+		wantMult float64
+		minDays  int
+		maxDays  int
+	}{
+		{"fresh set, 2+ years left", time.Date(2025, 11, 1, 0, 0, 0, 0, time.UTC), 1.0, 700, 950},
+		{"~181 days left", now.AddDate(0, 0, -((3*365)-181)), 1.0, 175, 190},
+		{"~90 days left", now.AddDate(0, 0, -((3*365)-90)), 0.5, 85, 95},
+		{"~30 days left", now.AddDate(0, 0, -((3*365)-30)), 0.2, 25, 35},
+		{"~7 days left", now.AddDate(0, 0, -((3*365)-7)), 0.05, 5, 10},
+		{"~3 days left", now.AddDate(0, 0, -((3*365)-3)), 0.05, 1, 5},
+		{"already rotated", now.AddDate(-4, 0, 0), 0.0, -400, -300},
+	}
+	for _, c := range cases {
+		days, mult := standardRotationFactor(c.release, now)
+		if mult != c.wantMult {
+			t.Errorf("%s: multiplier = %v, want %v (days=%d)", c.label, mult, c.wantMult, days)
+		}
+		if days < c.minDays || days > c.maxDays {
+			t.Errorf("%s: days = %d, want in [%d,%d]", c.label, days, c.minDays, c.maxDays)
+		}
+	}
+}
+
+func TestCompute_StandardRotationPenalty(t *testing.T) {
+	now := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC)
+	// Card A: rotates in 5 days → multiplier 0.05
+	rotatingSoon := now.AddDate(0, 0, -((3*365)-5))
+	// Card B: rotates in 2 years → multiplier 1.0
+	fresh := now.AddDate(-1, 0, 0)
+
+	cards := scryfall.BuildIndex([]*scryfall.Card{
+		{Name: "Rotating Soon", Rarity: "rare", TypeLine: "Creature", LatestRelease: rotatingSoon},
+		{Name: "Fresh Card", Rarity: "rare", TypeLine: "Creature", LatestRelease: fresh},
+	})
+	event := &mtggoldfish.TournamentEvent{Title: "Tour", StarTier: 1}
+	decks := []*DeckRecord{
+		{Event: event, Archetype: "Deck1", Cards: []mtggoldfish.DeckCard{{Name: "Rotating Soon", Quantity: 4}, {Name: "Fresh Card", Quantity: 4}}},
+		{Event: event, Archetype: "Deck2", Cards: []mtggoldfish.DeckCard{{Name: "Rotating Soon", Quantity: 4}, {Name: "Fresh Card", Quantity: 4}}},
+	}
+
+	stdOut := Compute(decks, cards, "standard", now)
+	if len(stdOut) != 2 {
+		t.Fatalf("expected 2 cards, got %d", len(stdOut))
+	}
+	// Find each by name
+	var rot, full *model.CardRecommendation
+	for _, c := range stdOut {
+		if c.Name == "Rotating Soon" {
+			rot = c
+		}
+		if c.Name == "Fresh Card" {
+			full = c
+		}
+	}
+	if rot == nil || full == nil {
+		t.Fatalf("missing expected cards")
+	}
+	// Fresh card should be ranked first (no penalty), rotating second.
+	if stdOut[0].Name != "Fresh Card" {
+		t.Errorf("Fresh Card should be ranked first; got %q first", stdOut[0].Name)
+	}
+	if rot.DaysUntilRotation < 1 || rot.DaysUntilRotation > 10 {
+		t.Errorf("Rotating Soon DaysUntilRotation = %d, expected ~5", rot.DaysUntilRotation)
+	}
+	if rot.Score >= rot.RawScore {
+		t.Errorf("Rotating Soon final score (%v) should be < raw score (%v)", rot.Score, rot.RawScore)
+	}
+	// Pioneer (or any non-Standard) should ignore the penalty.
+	pioOut := Compute(decks, cards, "pioneer", now)
+	for _, c := range pioOut {
+		if c.DaysUntilRotation != 0 {
+			t.Errorf("non-standard format should not set DaysUntilRotation; got %d for %q", c.DaysUntilRotation, c.Name)
+		}
+		if c.Score != c.RawScore && c.RawScore != 0 {
+			t.Errorf("non-standard format Score != RawScore for %q: %v vs %v", c.Name, c.Score, c.RawScore)
+		}
 	}
 }
 

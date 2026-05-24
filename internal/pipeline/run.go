@@ -40,9 +40,10 @@ type Config struct {
 }
 
 const (
-	defaultMaxEvents    = 5
-	defaultMaxDecks     = 16
-	defaultMaxAgeDays   = 30
+	defaultMaxEvents    = 10
+	defaultMaxDecks     = 32
+	defaultMaxAgeDays   = 45
+	maxTournamentPages  = 2 // how many MTGGoldfish pages of tournaments to walk
 	minFormatsToSucceed = 1
 )
 
@@ -122,10 +123,22 @@ func runFormat(
 	cutoff time.Time,
 	logger *slog.Logger,
 ) (*model.FormatRanking, error) {
-	logger.Info("fetching tournaments")
-	events, err := cfg.MTGGoldfish.FetchTournaments(ctx, f.Slug)
-	if err != nil {
-		return nil, fmt.Errorf("tournaments: %w", err)
+	logger.Info("fetching tournaments", "pages", maxTournamentPages)
+	var events []mtggoldfish.TournamentEvent
+	for page := 1; page <= maxTournamentPages; page++ {
+		batch, err := cfg.MTGGoldfish.FetchTournamentsPage(ctx, f.Slug, page)
+		if err != nil {
+			if page == 1 {
+				return nil, fmt.Errorf("tournaments: %w", err)
+			}
+			logger.Warn("tournaments page fetch failed — continuing with what we have",
+				"page", page, "err", err)
+			break
+		}
+		events = append(events, batch...)
+		if len(batch) == 0 {
+			break
+		}
 	}
 
 	// Filter by age, sort most-recent-first, cap.
@@ -144,20 +157,30 @@ func runFormat(
 	}
 	logger.Info("tournaments filtered", "kept", len(filtered), "raw", len(events))
 
-	// Collect unique deck URLs to fetch. Track each deck's tournament context.
+	// For each event, fetch its detail page to get the full standings list
+	// (the tournaments index only inlines ~4–8 rows per event). Fall back to
+	// the inline standings if the detail fetch fails.
 	type planEntry struct {
-		event     *mtggoldfish.TournamentEvent
-		standing  mtggoldfish.DeckStanding
+		event    *mtggoldfish.TournamentEvent
+		standing mtggoldfish.DeckStanding
 	}
 	seen := map[string]bool{}
 	var plan []planEntry
 	for i := range filtered {
 		ev := &filtered[i]
-		limit := cfg.MaxDecksPerEvent
-		if limit > len(ev.Standings) {
-			limit = len(ev.Standings)
+		standings, err := cfg.MTGGoldfish.FetchTournamentStandings(ctx, ev.URL)
+		if err != nil || len(standings) == 0 {
+			if err != nil {
+				logger.Warn("event detail fetch failed; using inline standings",
+					"event", ev.Title, "err", err)
+			}
+			standings = ev.Standings
 		}
-		for _, s := range ev.Standings[:limit] {
+		limit := cfg.MaxDecksPerEvent
+		if limit > len(standings) {
+			limit = len(standings)
+		}
+		for _, s := range standings[:limit] {
 			if seen[s.DeckID] {
 				continue
 			}
@@ -195,7 +218,7 @@ func runFormat(
 		}
 	}
 
-	cardRecs := score.Compute(records, index)
+	cardRecs := score.Compute(records, index, f.Slug, time.Now().UTC())
 
 	tourRefs := make([]*model.TournamentRef, 0, len(filtered))
 	for i := range filtered {

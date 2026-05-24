@@ -1,72 +1,98 @@
-# metacrafter
+# MTGA MetaCrafter
 
 > "I have wildcards in MTG Arena — what should I craft?"
 
-A small web app that ranks the cards most worth crafting in the current
-Standard meta. It tells you, for each top card: how many copies to craft
-(1–4), the wildcard rarity, and which competitive decks play it.
+A small web app that ranks the cards most worth crafting per format, based on
+how often they appear in recent tournament top finishes. Each row shows
+recommended copies (1–4), wildcard rarity, the archetypes that play it, and —
+for Standard — how close it is to rotation.
 
-The dataset refreshes weekly.
+**Live**: https://mtga-metacrafter.fly.dev/
+
+**Source**: this repo. MIT-licensed, contributions welcome.
+
+The dataset refreshes daily.
 
 ## Why
 
-Picking what to craft with limited wildcards is a guessing game for most
-players. The information *exists* (in tournament results and meta reports)
-but never in a single, easy-to-scan list. This is that list.
+Picking what to craft with limited wildcards is a guessing game. The data
+*exists* in tournament results — but never in a single, easy-to-scan,
+"what should I actually craft this week?" list. This is that list.
 
 ## How it works
 
-- **Card data**: [Scryfall](https://scryfall.com/docs/api) bulk JSON
-  (official, free).
+- **Card data**: [Scryfall](https://scryfall.com/docs/api) bulk JSON and
+  `/sets` (official, free).
 - **Tournament data**: [MTGGoldfish](https://www.mtggoldfish.com/) recent
-  tournament listings per format. For each format we take the most recent
-  non-League events (last 30 days) and pull their top deck standings.
-  Scraped daily at a polite cadence (1 req/sec, descriptive `User-Agent`).
-  If you maintain MTGGoldfish and want this removed, open an issue.
+  tournament listings per format. We walk the most recent pages, drop MTGO
+  Leagues entirely, and pull the top deck standings from each remaining
+  event. Scraped daily at a polite cadence (1 req/sec, descriptive UA). If
+  you maintain MTGGoldfish and want this removed, open an issue.
 - **Scoring**:
-  `score(card) = Σ over decks (copies_in_deck × tier_weight)`, where
-  `tier_weight = stars + 1` (so a 3-star Pro Tour deck counts 4× a base
-  challenge deck). MTGO leagues are excluded entirely.
-- **Recommended copies**: the max copy count seen for that card in any
-  single deck, clamped to 1–4.
-- **Cross-format bonus**: every card row shows other formats where the
-  same card is also in the top-30 (e.g. a Standard card flagged "+Pioneer").
+  `score(card) = Σ over decks (copies_in_deck × tier_weight)`,
+  where `tier_weight = stars + 1` (so a 3-star event counts 4× a base
+  challenge). Cards must appear in ≥ 2 distinct decks to make the list.
+- **Rotation penalty (Standard only)**: cards close to rotating out of
+  Standard get their score multiplied down: ≥ 180 days left → 1.0,
+  90d → 0.5, 30d → 0.2, ≤ 7d → 0.05. Each row carries a "rotates in ~Nd"
+  badge when applicable.
+- **Recommended copies**: highest copy count seen in any single deck,
+  clamped to 1–4. (Singleton formats like Commander/Brawl naturally
+  resolve to 1.)
+- **Cross-format bonus**: each row shows the other configured formats
+  where the same card is also in that format's top-30 (e.g. a Standard
+  card flagged "+Pioneer").
+
+## Supported formats
+
+MTGGoldfish's tournament URLs cover: `standard`, `pioneer`, `explorer`,
+`alchemy`, `historic`, `timeless`, `modern`, `pauper`, `legacy`, `vintage`,
+`commander`, `brawl`. Each instance is configured with the `FORMATS` env
+var — defaults to `standard,pioneer`.
+
+Data volume varies hugely between formats; small / casual formats may
+yield very thin rankings.
 
 ## Architecture
 
-A single Go binary. It serves the site via `html/template` + HTMX and
-runs the scraper on an internal daily schedule, holding the result in
-memory plus a JSON snapshot on disk. Deployed on Fly.io.
+A single Go binary. Serves `html/template` + HTMX on top of a per-format
+in-memory dataset that's refreshed on an internal daily schedule and
+persisted to a JSON snapshot for cold-start recovery. Deployed on
+Fly.io free tier.
 
 ## Known limitations
 
 - "Most played in top tournaments" isn't always "best to craft" for a
-  budget player. A budget mode (weight by inverse rarity) is on the roadmap.
-- Standard rotation (every September) stales the data instantly; the
-  page surfaces a "data as of …" banner.
+  budget player. A budget-mode toggle is on the roadmap.
+- Rotation dates are *estimated* (`set_release + 3 years`) — close enough
+  for the multiplier, but not authoritative.
+- MTGO leagues are excluded as low-stakes 5-0 dumps; if a format only
+  shows league data (rare formats), its ranking will be empty.
 - No MTGA collection sync yet — deferred.
 
 ## Development
 
 ```
 go test ./...
-go run ./cmd/metacrafter
+go run ./cmd/mtga-metacrafter
 # open http://localhost:8080
 ```
 
 Environment variables:
 
-| name              | default          | purpose                              |
-|-------------------|------------------|--------------------------------------|
-| `LISTEN_ADDR`     | `:8080`          | HTTP listen address                  |
-| `DATA_DIR`        | `./data`         | snapshot location                    |
-| `ADMIN_TOKEN`     | (unset)          | secret required for `/admin/refresh` |
-| `SEED_PATH`       | `./seed.json`    | initial dataset for empty `DATA_DIR` |
-| `REFRESH_PERIOD`  | `24h` (daily)    | scrape interval                      |
-| `FORMATS`         | `standard,pioneer` | comma-separated slugs to rank      |
-| `LOG_LEVEL`       | `info`           | `debug`, `info`, `warn`, `error`     |
+| name              | default              | purpose                                |
+|-------------------|----------------------|----------------------------------------|
+| `LISTEN_ADDR`     | `:8080`              | HTTP listen address                    |
+| `DATA_DIR`        | `./data`             | snapshot location                      |
+| `ADMIN_TOKEN`     | (unset)              | secret required for `/admin/refresh`   |
+| `SEED_PATH`       | `./seed.json`        | initial dataset for empty `DATA_DIR`   |
+| `REFRESH_PERIOD`  | `24h` (daily)        | scrape interval                        |
+| `FORMATS`         | `standard,pioneer`   | comma-separated slugs to rank          |
+| `LOG_LEVEL`       | `info`               | `debug`, `info`, `warn`, `error`       |
 
-Supported format slugs: `standard`, `pioneer`, `modern`, `pauper`, `legacy`.
+Supported format slugs: `standard`, `pioneer`, `explorer`, `alchemy`,
+`historic`, `timeless`, `modern`, `pauper`, `legacy`, `vintage`,
+`commander`, `brawl`.
 
 ## License
 

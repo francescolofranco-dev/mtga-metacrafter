@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="MTGA MetaCrafter">
+  <!-- Card body -->
+  <rect x="6" y="4" width="52" height="56" rx="6" ry="6" fill="#f5c518" stroke="#0f1115" stroke-width="3"/>
+  <!-- Art window -->
+  <rect x="12" y="11" width="40" height="22" rx="2" ry="2" fill="#0f1115"/>
+  <!-- Anvil / hammer mark inside the art window: a stylized "crafting" hint -->
+  <path d="M19 22 H37 V25 H35 V28 H21 V25 H19 Z" fill="#f5c518"/>
+  <circle cx="45" cy="22" r="3" fill="#f5c518"/>
+  <!-- Title bar mimic -->
+  <rect x="12" y="36" width="40" height="3" rx="1" fill="#0f1115"/>
+  <!-- Big "MC" monogram -->
+  <text x="32" y="55" font-family="ui-sans-serif, system-ui, -apple-system, Roboto, sans-serif"
+        font-size="13" font-weight="800" text-anchor="middle" fill="#0f1115">MC</text>
+</svg>

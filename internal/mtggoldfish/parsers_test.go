@@ -44,6 +44,25 @@ func TestParseTournaments_RealFixture(t *testing.T) {
 	}
 }
 
+func TestParseTournamentDetailStandings_RealFixture(t *testing.T) {
+	html := mustReadFixture(t, "tournament_detail.html")
+	rows, err := ParseTournamentDetailStandings(html, "https://www.mtggoldfish.com")
+	if err != nil {
+		t.Fatalf("ParseTournamentDetailStandings: %v", err)
+	}
+	if len(rows) < 30 {
+		t.Fatalf("expected >= 30 standings rows from detail page, got %d", len(rows))
+	}
+	for _, r := range rows {
+		if r.DeckID == "" || r.Archetype == "" {
+			t.Errorf("missing deck id or archetype: %+v", r)
+		}
+		if !filepathLike(r.DeckURL, "/deck/visual/") {
+			t.Errorf("URL not in visual form: %q", r.DeckURL)
+		}
+	}
+}
+
 func TestParseDeckVisual_RealFixture(t *testing.T) {
 	html := mustReadFixture(t, "deck_visual.html")
 	cards, err := ParseDeckVisual(html)

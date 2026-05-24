@@ -35,9 +35,19 @@ func NewClient(logger *slog.Logger) *Client {
 }
 
 // FetchLegalInAny returns every oracle card that is legal in at least one
-// of the listed formats (e.g. "standard", "pioneer", "modern").
+// of the listed formats (e.g. "standard", "pioneer", "modern"). Each card's
+// LatestRelease is populated from the /sets endpoint so downstream scoring
+// can estimate Standard rotation distance.
 func (c *Client) FetchLegalInAny(ctx context.Context, formats []string) ([]*Card, error) {
 	t0 := time.Now()
+
+	sets, err := c.fetchSetReleaseDates(ctx)
+	if err != nil {
+		c.Logger.Warn("scryfall sets fetch failed — rotation estimates unavailable", "err", err)
+		sets = map[string]time.Time{}
+	} else {
+		c.Logger.Info("scryfall sets resolved", "count", len(sets))
+	}
 
 	bulkURL, err := c.findBulkURL(ctx, "oracle_cards")
 	if err != nil {
@@ -45,7 +55,7 @@ func (c *Client) FetchLegalInAny(ctx context.Context, formats []string) ([]*Card
 	}
 	c.Logger.Info("scryfall bulk url resolved", "type", "oracle_cards", "url", bulkURL, "formats", formats)
 
-	cards, total, err := c.fetchLegalFromBulk(ctx, bulkURL, formats)
+	cards, total, err := c.fetchLegalFromBulk(ctx, bulkURL, formats, sets)
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +64,62 @@ func (c *Client) FetchLegalInAny(ctx context.Context, formats []string) ([]*Card
 		"cards_kept", len(cards),
 		"elapsed", time.Since(t0).String())
 	return cards, nil
+}
+
+type setsListResponse struct {
+	Data []struct {
+		Code       string `json:"code"`
+		ReleasedAt string `json:"released_at"`
+	} `json:"data"`
+	HasMore  bool   `json:"has_more"`
+	NextPage string `json:"next_page"`
+}
+
+// fetchSetReleaseDates returns a map[set_code]released_at via the /sets API.
+// The endpoint returns all sets in a single page; we handle pagination just
+// in case Scryfall ever changes that.
+func (c *Client) fetchSetReleaseDates(ctx context.Context) (map[string]time.Time, error) {
+	out := map[string]time.Time{}
+	next := c.BaseURL + "/sets"
+	for next != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body := resp.Body
+		if resp.StatusCode != http.StatusOK {
+			body.Close()
+			return nil, fmt.Errorf("status %d", resp.StatusCode)
+		}
+		var r setsListResponse
+		if err := json.NewDecoder(body).Decode(&r); err != nil {
+			body.Close()
+			return nil, err
+		}
+		body.Close()
+		for _, s := range r.Data {
+			if s.Code == "" || s.ReleasedAt == "" {
+				continue
+			}
+			t, err := time.Parse("2006-01-02", s.ReleasedAt)
+			if err != nil {
+				continue
+			}
+			out[s.Code] = t
+		}
+		if !r.HasMore {
+			break
+		}
+		next = r.NextPage
+	}
+	return out, nil
 }
 
 type bulkListResponse struct {
@@ -112,8 +178,10 @@ type rawCardFace struct {
 }
 
 // fetchLegalFromBulk stream-decodes the oracle_cards JSON array, keeping
-// cards legal in at least one of the listed formats. Returns (kept, total_seen, error).
-func (c *Client) fetchLegalFromBulk(ctx context.Context, url string, formats []string) ([]*Card, int, error) {
+// cards legal in at least one of the listed formats. Each card's
+// LatestRelease is filled from setReleases[set_code] when available.
+// Returns (kept, total_seen, error).
+func (c *Client) fetchLegalFromBulk(ctx context.Context, url string, formats []string, setReleases map[string]time.Time) ([]*Card, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, err
@@ -150,7 +218,11 @@ func (c *Client) fetchLegalFromBulk(ctx context.Context, url string, formats []s
 		if !legalInAny(r.Legalities, formats) {
 			continue
 		}
-		out = append(out, convert(r))
+		card := convert(r)
+		if d, ok := setReleases[card.Set]; ok {
+			card.LatestRelease = d
+		}
+		out = append(out, card)
 	}
 	return out, total, nil
 }

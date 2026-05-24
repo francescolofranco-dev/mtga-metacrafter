@@ -35,6 +35,7 @@ type DeckCard struct {
 type FormatSpec struct {
 	Slug        string // URL path piece: "standard", "pioneer", ...
 	DisplayName string // "Standard", "Pioneer", ...
+	Singleton   bool   // commander/brawl etc. — copies are always 1
 }
 
 // SupportedFormats enumerates the formats we know how to scrape.
@@ -42,9 +43,16 @@ type FormatSpec struct {
 var SupportedFormats = []FormatSpec{
 	{Slug: "standard", DisplayName: "Standard"},
 	{Slug: "pioneer", DisplayName: "Pioneer"},
+	{Slug: "explorer", DisplayName: "Explorer"},
+	{Slug: "alchemy", DisplayName: "Alchemy"},
+	{Slug: "historic", DisplayName: "Historic"},
+	{Slug: "timeless", DisplayName: "Timeless"},
 	{Slug: "modern", DisplayName: "Modern"},
 	{Slug: "pauper", DisplayName: "Pauper"},
 	{Slug: "legacy", DisplayName: "Legacy"},
+	{Slug: "vintage", DisplayName: "Vintage"},
+	{Slug: "commander", DisplayName: "Commander", Singleton: true},
+	{Slug: "brawl", DisplayName: "Brawl", Singleton: true},
 }
 
 // FormatBySlug returns the spec for slug, or false if unknown.

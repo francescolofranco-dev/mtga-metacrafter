@@ -39,11 +39,13 @@ type CardRecommendation struct {
 	Set               string          `json:"set"`
 	ImageURI          string          `json:"image_uri"`
 	ScryfallURL       string          `json:"scryfall_url"`
-	Score             float64         `json:"score"`
+	Score             float64         `json:"score"`              // final score (after any rotation penalty)
+	RawScore          float64         `json:"raw_score,omitempty"` // pre-penalty score (Standard only)
 	RecommendedCopies int             `json:"recommended_copies"` // 1-4
 	DeckAppearances   int             `json:"deck_appearances"`   // total decks containing it
 	Archetypes        []*ArchetypeRef `json:"archetypes"`         // archetypes featuring it
 	AlsoIn            []string        `json:"also_in,omitempty"`  // other format slugs where also top-N
+	DaysUntilRotation int             `json:"days_until_rotation,omitempty"` // Standard only; 0 = unknown / not applicable
 }
 
 // ArchetypeRef is one archetype playing a given card.

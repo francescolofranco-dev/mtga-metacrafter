@@ -1,14 +1,17 @@
 package scryfall
 
+import "time"
+
 // Card holds the subset of Scryfall card metadata we render.
 type Card struct {
-	Name     string   `json:"name"`
-	Rarity   string   `json:"rarity"`    // common | uncommon | rare | mythic
-	ManaCost string   `json:"mana_cost"` // e.g. "{1}{G}{G}"
-	TypeLine string   `json:"type_line"`
-	Set      string   `json:"set"` // 3-letter code, e.g. "fdn"
-	ImageURI string   `json:"image_uri"`
-	Faces    []string `json:"faces,omitempty"` // additional face names for DFC/split/adventure
+	Name          string    `json:"name"`
+	Rarity        string    `json:"rarity"`    // common | uncommon | rare | mythic
+	ManaCost      string    `json:"mana_cost"` // e.g. "{1}{G}{G}"
+	TypeLine      string    `json:"type_line"`
+	Set           string    `json:"set"` // 3-letter code, e.g. "fdn"
+	ImageURI      string    `json:"image_uri"`
+	Faces         []string  `json:"faces,omitempty"` // additional face names for DFC/split/adventure
+	LatestRelease time.Time `json:"latest_release,omitempty"` // release date of `Set`; used for Standard rotation estimation
 }
 
 // Wildcard rarity letters used in MTG Arena: C / U / R / M.

@@ -1,0 +1,83 @@
+{{define "page"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MTGA MetaCrafter — what to craft for MTG Arena Standard</title>
+<meta name="description" content="Cards most worth crafting in the current MTG Arena Standard meta.">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/app.css">
+<script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body>
+<header>
+  <h1>MTGA MetaCrafter</h1>
+  <p class="tagline">What to craft for MTG Arena Standard, ranked by the current meta.</p>
+  {{with .Dataset}}
+    <p class="stamp">Data as of {{.GeneratedAt.Format "2006-01-02"}} · {{.SourceLabel}}</p>
+  {{else}}
+    <p class="stamp warn">No data yet. The first scrape is still running — refresh in a minute.</p>
+  {{end}}
+</header>
+
+<section class="controls">
+  <input type="search" id="filter" name="q" placeholder="Filter by card name…" autocomplete="off"
+         value="{{.Query}}"
+         hx-get="/rows" hx-trigger="input changed delay:150ms, search"
+         hx-target="#rows" hx-include="[name='sort']" hx-swap="innerHTML"
+         hx-push-url="false">
+  <label class="sort">Sort
+    <select name="sort"
+            hx-get="/rows" hx-trigger="change" hx-target="#rows" hx-include="[name='q']"
+            hx-swap="innerHTML">
+      <option value="score"  {{if eq .Sort "score"}}selected{{end}}>Score (default)</option>
+      <option value="name"   {{if eq .Sort "name"}}selected{{end}}>Name (A→Z)</option>
+      <option value="rarity" {{if eq .Sort "rarity"}}selected{{end}}>Rarity (mythic first)</option>
+      <option value="copies" {{if eq .Sort "copies"}}selected{{end}}>Recommended copies</option>
+    </select>
+  </label>
+</section>
+
+<table class="cards">
+  <thead>
+    <tr>
+      <th class="num">#</th>
+      <th class="name">Card</th>
+      <th class="rarity">Wildcard</th>
+      <th class="copies">Copies</th>
+      <th class="score">Score</th>
+      <th class="decks">Decks playing it</th>
+    </tr>
+  </thead>
+  <tbody id="rows">
+    {{template "rows-inner" .}}
+  </tbody>
+</table>
+
+<footer>
+  <p>Open-source on <a href="https://github.com/francescolofranco-dev/mtga-metacrafter">GitHub</a>. MIT licensed.</p>
+  <p class="fine">Meta data scraped weekly from <a href="https://www.mtggoldfish.com/" rel="noopener">MTGGoldfish</a>; card data from <a href="https://scryfall.com/" rel="noopener">Scryfall</a>. We aim to be a polite citizen — see the README.</p>
+</footer>
+</body>
+</html>{{end}}
+
+{{define "rows"}}{{template "rows-inner" .}}{{end}}
+
+{{define "rows-inner"}}
+{{range $i, $c := .Rows}}
+<tr data-name="{{lower $c.Name}}">
+  <td class="num">{{add $i 1}}</td>
+  <td class="name">
+    <a href="https://scryfall.com/search?q=%21%22{{$c.Name}}%22" target="_blank" rel="noopener">{{$c.Name}}</a>
+    {{if $c.ManaCost}}<span class="mana">{{$c.ManaCost}}</span>{{end}}
+  </td>
+  <td class="rarity wc-{{$c.Wildcard}}" title="{{$c.Rarity}}">{{$c.Wildcard}}</td>
+  <td class="copies">{{$c.RecommendedCopies}}</td>
+  <td class="score">{{printf "%.1f" $c.Score}}</td>
+  <td class="decks">
+    {{range $j, $d := $c.Decks}}{{if $j}}, {{end}}<a href="{{$d.ArchetypeURL}}" target="_blank" rel="noopener" title="{{printf "%.1f" $d.AvgCopies}} copies in {{printf "%.0f" $d.InclusionPct}}% of decks ({{printf "%.1f" $d.MetasharePct}}% meta)">{{$d.ArchetypeName}}</a>{{end}}
+  </td>
+</tr>
+{{else}}
+<tr><td colspan="6" class="empty">No cards match.</td></tr>
+{{end}}
+{{end}}

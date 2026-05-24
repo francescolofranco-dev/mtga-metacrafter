@@ -1,0 +1,18 @@
+# Binaries
+/mtga-metacrafter
+/metacrafter
+/crafter
+*.exe
+*.test
+*.out
+
+# Local data + caches
+/data/
+.cache/
+*.local.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

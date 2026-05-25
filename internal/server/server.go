@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/model"
-	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtggoldfish"
+	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtgtop8"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scheduler"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/store"
 )
@@ -29,7 +29,7 @@ type Server struct {
 	Logger     *slog.Logger
 	AdminToken string
 	// EnabledFormats is the list shown in the format selector, in display order.
-	EnabledFormats []mtggoldfish.FormatSpec
+	EnabledFormats []mtgtop8.FormatSpec
 
 	tmpl *template.Template
 }
@@ -39,7 +39,7 @@ func New(
 	sched *scheduler.Scheduler,
 	logger *slog.Logger,
 	adminToken string,
-	enabledFormats []mtggoldfish.FormatSpec,
+	enabledFormats []mtgtop8.FormatSpec,
 ) (*Server, error) {
 	tmpl, err := template.New("").Funcs(funcMap()).ParseFS(templateFS, "templates/*.html.tmpl")
 	if err != nil {
@@ -73,7 +73,7 @@ type viewData struct {
 	Dataset        *model.Dataset
 	Format         *model.FormatRanking // resolved active format (may be nil)
 	FormatSlug     string               // active slug
-	EnabledFormats []mtggoldfish.FormatSpec
+	EnabledFormats []mtgtop8.FormatSpec
 	Rows           []*model.CardRecommendation
 	Query          string
 	Sort           string
@@ -173,7 +173,7 @@ func funcMap() template.FuncMap {
 		"lower": strings.ToLower,
 		"trim":  strings.TrimSpace,
 		"displayFormat": func(slug string) string {
-			if f, ok := mtggoldfish.FormatBySlug(slug); ok {
+			if f, ok := mtgtop8.FormatBySlug(slug); ok {
 				return f.DisplayName
 			}
 			if slug == "" {

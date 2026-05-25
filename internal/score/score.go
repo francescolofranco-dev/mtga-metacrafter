@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/model"
-	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtggoldfish"
+	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtgtop8"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scryfall"
 )
 
@@ -17,143 +17,89 @@ import (
 const StandardSetLifespan = 3 * 365 * 24 * time.Hour
 
 const (
-	// MaxResults caps the per-format output. Long lists are noise — we hold
-	// the actually-craftable shortlist.
+	// MaxResults caps the per-format output.
 	MaxResults = 30
 
-	// MinAppearancesToInclude drops one-off cards that showed up in a single
-	// deck — likely techs or experiments rather than crafted staples.
-	MinAppearancesToInclude = 2
+	// MinClusterAppearancesToInclude drops cards that show up in only one
+	// distinct deck cluster — single-list tech, not worth crafting yet.
+	MinClusterAppearancesToInclude = 2
 
-	// MaxArchetypesToShow caps the per-card archetype list rendered in the
+	// MaxArchetypesToShow caps the per-card cluster list rendered in the
 	// "decks playing it" cell.
 	MaxArchetypesToShow = 5
+
+	// JaccardThreshold is how much overlap on unique mainboard card names is
+	// needed for two decks to count as the same cluster. 0.75 means 75% of
+	// the unique names must be shared.
+	JaccardThreshold = 0.75
 )
 
-// DeckRecord ties a parsed decklist to its tournament context.
+// DeckRecord ties a parsed mainboard to its tournament context.
 type DeckRecord struct {
-	Event     *mtggoldfish.TournamentEvent
-	Archetype string
-	Cards     []mtggoldfish.DeckCard
+	Event     *mtgtop8.TournamentEvent
+	Archetype string // display label from the source (NOT used for grouping)
+	Cards     []mtgtop8.DeckCard
 }
 
-// Compute ranks cards using per-archetype aggregation.
+// Compute clusters decks by mainboard similarity and ranks cards by their
+// presence across distinct clusters.
 //
-// For each archetype A we compute:
+// Scoring (no archetype label is used):
 //
-//	quality(A) = sqrt( decks_in_A × avg_tier_weight_in_A )
+//  1. Group decks into clusters where every pair has Jaccard similarity ≥ 0.75
+//     on the set of unique mainboard card names. Greedy first-match assignment.
+//  2. For each cluster, compute:
+//       avg_event_tier  =  mean event TierWeight across the cluster's decks
+//       size_weight     =  sqrt(num_decks_in_cluster)
+//  3. For each card C in a cluster:
+//       avg_copies(C)   =  mean copies in cluster decks that contain C
+//       contribution(C, cluster) = avg_copies × avg_event_tier × size_weight
+//     score(C) = Σ contribution(C, cluster)  over every cluster containing C
 //
-// and for each card C in A:
+// A card spanning many distinct clusters can outscore a card stuck in one big
+// cluster — which is the point: more crafting flexibility = more value.
 //
-//	avg_copies(C,A)    = mean copies in decks-of-A that contain C
-//	inclusion(C,A)     = fraction of decks of A that contain C
-//	contribution(C,A)  = avg_copies × inclusion × quality(A)
-//
-// The card's score is the sum of its contributions across all archetypes it
-// appears in:
-//
-//	raw_score(C) = Σ_A contribution(C, A)
-//
-// Aggregating per-archetype (not per-deck) is the key change: it prevents a
-// single dominant archetype from monopolizing the top of the list, and it
-// rewards cards that span multiple archetypes — exactly the "if I craft this,
-// how many decks does it unlock?" question a player is asking.
-//
-// Tier weights (per event):
-//
-//	3-star Pro Tour       → 4
-//	2-star regional       → 3
-//	1-star notable        → 2
-//	unrated paper / MTGO  → 1
-//	MTGO 5-0 league       → 0.5
-//
-// For format "standard", the raw score is multiplied by a rotation-distance
-// penalty (cards close to leaving Standard are sharply discounted).
-// Recommended copies = highest copy count seen for the card in any single deck.
+// For format "standard" we then multiply by a rotation-distance penalty
+// (cards close to rotating out are sharply discounted).
 func Compute(decks []*DeckRecord, cards *scryfall.Index, formatSlug string, now time.Time) []*model.CardRecommendation {
-	// Group decks by archetype.
-	byArch := map[string][]*DeckRecord{}
-	for _, d := range decks {
-		byArch[d.Archetype] = append(byArch[d.Archetype], d)
-	}
+	clusters := clusterDecks(decks, JaccardThreshold)
 
 	type agg struct {
 		card             *scryfall.Card
 		score            float64
-		totalAppearances int // across all archetypes
+		clusterCount     int
 		maxCopies        int
-		archetypes       map[string]*model.ArchetypeRef // archetype name -> ref
+		// archetype-label-by-cluster, for display only
+		clusterRefs map[*deckCluster]*model.ArchetypeRef
 	}
 	aggs := map[string]*agg{}
 
-	for archName, archDecks := range byArch {
-		// archetype quality
-		tierSum := 0.0
-		for _, d := range archDecks {
-			tierSum += tierWeight(d.Event)
-		}
-		avgTier := tierSum / float64(len(archDecks))
-		quality := math.Sqrt(float64(len(archDecks)) * avgTier)
+	for _, cl := range clusters {
+		avgTier := cl.avgTier()
+		sizeWeight := math.Sqrt(float64(len(cl.decks)))
+		clusterLabel := cl.dominantLabel()
 
-		// for each card seen in this archetype, sum copies and count decks
-		type counts struct {
-			deckCount  int
-			copiesSum  int
-			maxCopies  int
-			scryCard   *scryfall.Card
-		}
-		archCards := map[string]*counts{}
+		for cardName, info := range cl.cardInfo(cards) {
+			avgCopies := float64(info.totalCopies) / float64(info.deckCount)
+			contribution := avgCopies * avgTier * sizeWeight
 
-		for _, d := range archDecks {
-			seenInDeck := map[string]bool{}
-			for _, dc := range d.Cards {
-				card, ok := cards.Lookup(dc.Name)
-				if !ok {
-					continue
-				}
-				if isBasicLand(card.TypeLine) {
-					continue
-				}
-				key := strings.ToLower(card.Name)
-				if seenInDeck[key] {
-					continue // protect against duplicate face matches
-				}
-				seenInDeck[key] = true
-				c := archCards[key]
-				if c == nil {
-					c = &counts{scryCard: card}
-					archCards[key] = c
-				}
-				c.deckCount++
-				c.copiesSum += dc.Quantity
-				if dc.Quantity > c.maxCopies {
-					c.maxCopies = dc.Quantity
-				}
-			}
-		}
-
-		// fold per-archetype contributions into the global aggregates
-		for key, c := range archCards {
-			avgCopies := float64(c.copiesSum) / float64(c.deckCount)
-			inclusion := float64(c.deckCount) / float64(len(archDecks))
-			contribution := avgCopies * inclusion * quality
-
+			key := strings.ToLower(cardName)
 			cur := aggs[key]
 			if cur == nil {
 				cur = &agg{
-					card:       c.scryCard,
-					archetypes: map[string]*model.ArchetypeRef{},
+					card:        info.card,
+					clusterRefs: map[*deckCluster]*model.ArchetypeRef{},
 				}
 				aggs[key] = cur
 			}
 			cur.score += contribution
-			cur.totalAppearances += c.deckCount
-			if c.maxCopies > cur.maxCopies {
-				cur.maxCopies = c.maxCopies
+			cur.clusterCount++
+			if info.maxCopies > cur.maxCopies {
+				cur.maxCopies = info.maxCopies
 			}
-			cur.archetypes[archName] = &model.ArchetypeRef{
-				Name:      archName,
-				DeckCount: c.deckCount,
+			cur.clusterRefs[cl] = &model.ArchetypeRef{
+				Name:      clusterLabel,
+				DeckCount: len(cl.decks),
 				AvgCopies: math.Round(avgCopies*10) / 10,
 			}
 		}
@@ -161,7 +107,7 @@ func Compute(decks []*DeckRecord, cards *scryfall.Index, formatSlug string, now 
 
 	out := make([]*model.CardRecommendation, 0, len(aggs))
 	for _, a := range aggs {
-		if a.totalAppearances < MinAppearancesToInclude {
+		if a.clusterCount < MinClusterAppearancesToInclude {
 			continue
 		}
 		raw := a.score
@@ -184,8 +130,8 @@ func Compute(decks []*DeckRecord, cards *scryfall.Index, formatSlug string, now 
 			Score:             round2(final),
 			RawScore:          round2(raw),
 			RecommendedCopies: clampCopies(a.maxCopies),
-			DeckAppearances:   a.totalAppearances,
-			Archetypes:        flattenArchetypes(a.archetypes),
+			DeckAppearances:   totalDecks(a.clusterRefs),
+			Archetypes:        flattenClusters(a.clusterRefs),
 			DaysUntilRotation: daysLeft,
 		})
 	}
@@ -202,12 +148,18 @@ func Compute(decks []*DeckRecord, cards *scryfall.Index, formatSlug string, now 
 	return out
 }
 
-// flattenArchetypes turns the map into the display-sorted slice (most
-// decks first, ties alphabetic) and caps to MaxArchetypesToShow.
-func flattenArchetypes(m map[string]*model.ArchetypeRef) []*model.ArchetypeRef {
-	out := make([]*model.ArchetypeRef, 0, len(m))
-	for _, v := range m {
-		out = append(out, v)
+func totalDecks(refs map[*deckCluster]*model.ArchetypeRef) int {
+	t := 0
+	for _, r := range refs {
+		t += r.DeckCount
+	}
+	return t
+}
+
+func flattenClusters(refs map[*deckCluster]*model.ArchetypeRef) []*model.ArchetypeRef {
+	out := make([]*model.ArchetypeRef, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, r)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].DeckCount != out[j].DeckCount {
@@ -251,19 +203,7 @@ func AnnotateCrossFormat(rankings map[string]*model.FormatRanking) {
 	}
 }
 
-func tierWeight(e *mtggoldfish.TournamentEvent) float64 {
-	if e == nil {
-		return 1
-	}
-	if e.IsLeague {
-		return 0.5
-	}
-	return float64(e.StarTier + 1)
-}
-
 // standardRotationFactor returns (days_until_rotation, multiplier).
-// The multiplier is 1.0 for cards with > 180 days left and drops sharply
-// the closer rotation gets. Cards estimated to be past rotation get 0.
 func standardRotationFactor(latestRelease, now time.Time) (int, float64) {
 	rotation := latestRelease.Add(StandardSetLifespan)
 	d := rotation.Sub(now)
@@ -284,11 +224,6 @@ func standardRotationFactor(latestRelease, now time.Time) (int, float64) {
 	}
 }
 
-func isBasicLand(typeLine string) bool {
-	low := strings.ToLower(typeLine)
-	return strings.Contains(low, "basic") && strings.Contains(low, "land")
-}
-
 func clampCopies(n int) int {
 	switch {
 	case n < 1:
@@ -305,8 +240,6 @@ func round2(f float64) float64 {
 }
 
 // buildScryfallURL returns a Scryfall search URL that lands on the exact card.
-// We URL-encode the whole `!"<name>"` query so quotes, commas, apostrophes,
-// and the "//" in split-card names round-trip correctly.
 func buildScryfallURL(name string) string {
 	q := `!"` + name + `"`
 	return "https://scryfall.com/search?q=" + url.QueryEscape(q)

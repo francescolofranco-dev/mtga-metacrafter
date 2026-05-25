@@ -31,19 +31,26 @@
   <details class="score-help">
     <summary>How is the score calculated?</summary>
     <div class="score-help-body">
-      <p>Scoring is <strong>per-archetype</strong>, then summed. This rewards cards that
-      span <em>multiple</em> archetypes (real staples), not just cards stuck in one
-      heavily-played deck.</p>
-      <p>For each archetype <code>A</code> a card appears in:</p>
+      <p>The score rewards cards that <strong>appear in many <em>distinct</em> tournament decks</strong>
+      — not how many copies of one deck happen to be popular this week.</p>
+      <p>For each format we scrape the top finishers of the most recent major
+      events from <a href="https://mtgtop8.com" rel="noopener">MTGTop8</a> ("Large Events Last 2 Months"
+      — RCQs, Regional Championships, MTGO Showcase/Challenges, etc.). MTGO Leagues and
+      casual store events are excluded by the source itself.</p>
+      <p>Two deck lists count as <strong>the same deck</strong> if they share ≥ 75% of their
+      unique mainboard card names (Jaccard similarity). Otherwise they count as separate
+      "deck clusters". Archetype labels are display-only — they don't drive the score.</p>
+      <p>For each cluster <code>C</code> a card appears in:</p>
       <ul>
-        <li><code>quality(A) = √(decks_in_A × avg_tier_weight)</code>  — square root dampens dominant archetypes so they can't monopolize the top.</li>
-        <li><code>contribution(A) = avg_copies × inclusion% × quality(A)</code></li>
+        <li><code>avg_tier(C)</code>  = mean event tier weight of the cluster's decks.</li>
+        <li><code>size(C)</code>  = √(decks_in_cluster) — gentle bonus for clusters with more representatives.</li>
+        <li><code>contribution(C)</code>  = avg_copies × avg_tier(C) × size(C)</li>
       </ul>
-      <p><code>score(card) = Σ contribution(A)</code> across every archetype that plays it.
-      A 4-of universal across 5 medium archetypes beats a 4-of locked to one huge archetype.</p>
-      <p><strong>Tier weight per event</strong>: 3-star Pro Tour → 4, 2-star → 3, 1-star → 2,
-      unrated paper / MTGO Challenge → 1, MTGO 5-0 League → 0.5.</p>
-      <p>A card must appear in at least <strong>2 distinct decks</strong> to make the list.</p>
+      <p><code>score(card) = Σ contribution(C)</code> across every cluster that plays it.
+      A card spanning 5 clusters can easily beat a card stuck in 1, even a big one.</p>
+      <p><strong>Tier weight per event</strong>: Pro Tour / Worlds → 5, Regional Championship → 4,
+      RCQ / Open → 3, MTGO Showcase → 2.5, Store Champ → 2, MTGO Challenge → 1.5, anything else → 1, MTGO League → 0.5.</p>
+      <p>A card must appear in at least <strong>2 distinct clusters</strong> to make the list.</p>
       <p><strong>Standard only</strong>: the raw score is multiplied by a rotation penalty —
       ≥ 180d → 1.0, 90d → 0.5, 30d → 0.2, ≤ 7d → 0.05, past rotation → 0. A "rotates in ~Nd"
       badge appears on affected rows.</p>

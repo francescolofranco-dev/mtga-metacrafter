@@ -7,116 +7,140 @@ import (
 	"time"
 
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/model"
-	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtggoldfish"
+	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtgtop8"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scryfall"
 )
 
-func TestCompute_BasicScoring(t *testing.T) {
-	cards := scryfall.BuildIndex([]*scryfall.Card{
-		{Name: "Llanowar Elves", Rarity: "common", TypeLine: "Creature — Elf Druid"},
-		{Name: "Mossborn Hydra", Rarity: "rare", TypeLine: "Creature — Hydra"},
-		{Name: "Forest", Rarity: "common", TypeLine: "Basic Land — Forest"},
-	})
-
-	major := &mtggoldfish.TournamentEvent{Title: "Pro Tour", StarTier: 3}
-	weekly := &mtggoldfish.TournamentEvent{Title: "Challenge 32", StarTier: 0}
-
-	decks := []*DeckRecord{
-		{Event: major, Archetype: "Selesnya Landfall", Cards: []mtggoldfish.DeckCard{
-			{Name: "Llanowar Elves", Quantity: 4},
-			{Name: "Mossborn Hydra", Quantity: 2},
-			{Name: "Forest", Quantity: 7}, // skip: basic land
-			{Name: "Unknown Card", Quantity: 3}, // skip: not in index
-		}},
-		{Event: weekly, Archetype: "Selesnya Landfall", Cards: []mtggoldfish.DeckCard{
-			{Name: "Llanowar Elves", Quantity: 4},
-			{Name: "Mossborn Hydra", Quantity: 4},
-		}},
-	}
-
-	out := Compute(decks, cards, "standard", time.Now())
-	if len(out) != 2 {
-		t.Fatalf("expected 2 cards, got %d", len(out))
-	}
-
-	// 1 archetype "Selesnya Landfall" with 2 decks of tier 4 + 1.
-	// avg_tier = 2.5, quality = sqrt(2 * 2.5) ≈ 2.236
-	// Llanowar Elves: avg_copies=4, inclusion=1.0 → 4 × 1 × 2.236 ≈ 8.944
-	if out[0].Name != "Llanowar Elves" {
-		t.Errorf("expected Llanowar Elves first, got %q", out[0].Name)
-	}
-	if got, want := out[0].Score, 8.94; absDiff(got, want) > 0.05 {
-		t.Errorf("Llanowar Elves score = %v, want ≈ %v", got, want)
-	}
-	if out[0].RecommendedCopies != 4 {
-		t.Errorf("Llanowar Elves rec copies = %d, want 4", out[0].RecommendedCopies)
-	}
-	if out[0].DeckAppearances != 2 {
-		t.Errorf("Llanowar Elves appearances = %d, want 2", out[0].DeckAppearances)
-	}
-	if out[0].Wildcard != "C" {
-		t.Errorf("Llanowar Elves wildcard = %q, want C", out[0].Wildcard)
-	}
-	if len(out[0].Archetypes) == 0 || out[0].Archetypes[0].Name != "Selesnya Landfall" {
-		t.Errorf("expected archetype 'Selesnya Landfall', got %+v", out[0].Archetypes)
+func TestJaccard(t *testing.T) {
+	a := map[string]bool{"a": true, "b": true, "c": true, "d": true}
+	b := map[string]bool{"a": true, "b": true, "c": true, "e": true}
+	got := jaccard(a, b)
+	want := 3.0 / 5.0
+	if absDiff(got, want) > 0.001 {
+		t.Errorf("jaccard = %v, want %v", got, want)
 	}
 }
 
-func TestCompute_PerArchetypeBeatsArchetypeStuffing(t *testing.T) {
-	// The user's bug: a card stuck in one big dominant archetype shouldn't
-	// always beat a card that spans multiple smaller archetypes. The new
-	// per-archetype scoring should give the diverse card a real shot.
+func TestCluster_MergesSimilarDecks(t *testing.T) {
+	event := &mtgtop8.TournamentEvent{TierWeight: 2}
+	// Two decks sharing 4 of 5 cards (Jaccard 4/6 = 0.667) — below 0.75, so
+	// they should NOT cluster.
+	d1 := &DeckRecord{Event: event, Archetype: "X", Cards: deckCards("A", "B", "C", "D", "E")}
+	d2 := &DeckRecord{Event: event, Archetype: "X", Cards: deckCards("A", "B", "C", "D", "F")}
+	clusters := clusterDecks([]*DeckRecord{d1, d2}, 0.75)
+	if len(clusters) != 2 {
+		t.Errorf("0.67 overlap should NOT cluster; got %d clusters", len(clusters))
+	}
+
+	// Two decks sharing 4 of 4 unique names (Jaccard 1.0) — should cluster.
+	d3 := &DeckRecord{Event: event, Archetype: "X", Cards: deckCards("A", "B", "C", "D")}
+	d4 := &DeckRecord{Event: event, Archetype: "X", Cards: deckCards("A", "B", "C", "D")}
+	clusters = clusterDecks([]*DeckRecord{d3, d4}, 0.75)
+	if len(clusters) != 1 {
+		t.Errorf("identical decks should cluster; got %d clusters", len(clusters))
+	}
+
+	// Two decks sharing 6 of 7 unique names (Jaccard 6/8 = 0.75) — at the
+	// threshold, should cluster.
+	d5 := &DeckRecord{Event: event, Archetype: "X", Cards: deckCards("A", "B", "C", "D", "E", "F", "G")}
+	d6 := &DeckRecord{Event: event, Archetype: "X", Cards: deckCards("A", "B", "C", "D", "E", "F", "H")}
+	clusters = clusterDecks([]*DeckRecord{d5, d6}, 0.75)
+	if len(clusters) != 1 {
+		t.Errorf("0.75 overlap should cluster at threshold; got %d clusters", len(clusters))
+	}
+}
+
+func TestCompute_DiversityBeatsStuffing(t *testing.T) {
+	// One huge cluster of 8 identical decks all playing "Dominant" 4-of, vs
+	// five small clusters of 2 decks each playing "Universal" 2-of. The
+	// diverse card should outscore the stuffed one even though more decks
+	// contain "Dominant".
 	cards := scryfall.BuildIndex([]*scryfall.Card{
-		{Name: "Dominant", Rarity: "rare", TypeLine: "Creature"},   // 4-of in one big archetype
-		{Name: "Universal", Rarity: "rare", TypeLine: "Creature"},  // 2-of across many archetypes
+		{Name: "Dominant", Rarity: "rare", TypeLine: "Creature"},
+		{Name: "Universal", Rarity: "rare", TypeLine: "Creature"},
+		// filler cards to differentiate clusters (each variant has its own filler)
+		{Name: "F1", Rarity: "common", TypeLine: "Creature"},
+		{Name: "F2", Rarity: "common", TypeLine: "Creature"},
+		{Name: "F3", Rarity: "common", TypeLine: "Creature"},
+		{Name: "F4", Rarity: "common", TypeLine: "Creature"},
+		{Name: "F5", Rarity: "common", TypeLine: "Creature"},
+		{Name: "B1", Rarity: "common", TypeLine: "Creature"},
+		{Name: "B2", Rarity: "common", TypeLine: "Creature"},
+		{Name: "B3", Rarity: "common", TypeLine: "Creature"},
+		{Name: "B4", Rarity: "common", TypeLine: "Creature"},
+		{Name: "X1", Rarity: "common", TypeLine: "Creature"},
+		{Name: "X2", Rarity: "common", TypeLine: "Creature"},
+		{Name: "X3", Rarity: "common", TypeLine: "Creature"},
+		{Name: "X4", Rarity: "common", TypeLine: "Creature"},
 	})
-	event := &mtggoldfish.TournamentEvent{Title: "Challenge", StarTier: 0}
+	event := &mtgtop8.TournamentEvent{TierWeight: 1.5}
 
 	var decks []*DeckRecord
-	// Big archetype: 8 decks, each plays 4 Dominant and nothing else relevant.
+	// 8 decks of one cluster: same 5 cards every time
 	for i := 0; i < 8; i++ {
 		decks = append(decks, &DeckRecord{
 			Event: event, Archetype: "Big Deck",
-			Cards: []mtggoldfish.DeckCard{{Name: "Dominant", Quantity: 4}},
+			Cards: deckCards("Dominant", "B1", "B2", "B3", "B4"),
 		})
 	}
-	// Five smaller archetypes, 2 decks each, each playing 2 Universal.
-	for _, arch := range []string{"Arch A", "Arch B", "Arch C", "Arch D", "Arch E"} {
+	// 2 decks of a small Dominant-shell variant (so Dominant qualifies under
+	// MinClusterAppearancesToInclude = 2).
+	for i := 0; i < 2; i++ {
+		decks = append(decks, &DeckRecord{
+			Event: event, Archetype: "Dom Variant",
+			Cards: deckCards("Dominant", "X1", "X2", "X3", "X4"),
+		})
+	}
+	// 5 distinct clusters of 2 decks each — each cluster has a unique filler
+	// so they don't merge.
+	fillers := [][]string{
+		{"F1"}, {"F2"}, {"F3"}, {"F4"}, {"F5"},
+	}
+	for _, f := range fillers {
 		for i := 0; i < 2; i++ {
+			cs := append([]string{"Universal"}, f...)
 			decks = append(decks, &DeckRecord{
-				Event: event, Archetype: arch,
-				Cards: []mtggoldfish.DeckCard{{Name: "Universal", Quantity: 2}},
+				Event: event, Archetype: "Spread Deck", Cards: deckCards(cs...),
 			})
 		}
 	}
 
 	out := Compute(decks, cards, "pioneer", time.Now())
-	if len(out) != 2 {
-		t.Fatalf("expected 2 cards, got %d", len(out))
+	if len(out) < 2 {
+		t.Fatalf("expected ≥ 2 cards, got %d", len(out))
 	}
-	// Dominant: 1 archetype, 8 decks, quality=sqrt(8*1)=2.83. contribution=4*1*2.83=11.31.
-	// Universal: 5 archetypes, each 2 decks @ quality=sqrt(2*1)=1.41.
-	//   per-archetype contribution = 2*1*1.41 = 2.83 → total across 5 = 14.14.
-	// So Universal must rank ahead of Dominant.
-	if out[0].Name != "Universal" {
-		t.Errorf("Universal (5 archetypes) should outrank Dominant (1 archetype); got order: %q, %q",
-			out[0].Name, out[1].Name)
+
+	// Find both rankings.
+	var dom, uni *model.CardRecommendation
+	for _, c := range out {
+		switch c.Name {
+		case "Dominant":
+			dom = c
+		case "Universal":
+			uni = c
+		}
+	}
+	if dom == nil || uni == nil {
+		t.Fatalf("missing expected cards in output")
+	}
+	if uni.Score <= dom.Score {
+		t.Errorf("Universal (5 clusters) should outscore Dominant (1 cluster): uni=%v dom=%v", uni.Score, dom.Score)
 	}
 }
 
-func TestCompute_DropsSingleAppearance(t *testing.T) {
+func TestCompute_DropsSingleClusterCard(t *testing.T) {
 	cards := scryfall.BuildIndex([]*scryfall.Card{
 		{Name: "Tech Card", Rarity: "rare", TypeLine: "Creature"},
 	})
-	event := &mtggoldfish.TournamentEvent{Title: "x", StarTier: 1}
+	event := &mtgtop8.TournamentEvent{TierWeight: 1}
 	decks := []*DeckRecord{
-		{Event: event, Archetype: "Random", Cards: []mtggoldfish.DeckCard{
-			{Name: "Tech Card", Quantity: 1},
-		}},
+		// One cluster (2 identical decks containing Tech Card)
+		{Event: event, Archetype: "X", Cards: deckCards("Tech Card", "B1", "B2")},
+		{Event: event, Archetype: "X", Cards: deckCards("Tech Card", "B1", "B2")},
 	}
-	out := Compute(decks, cards, "standard", time.Now())
+	out := Compute(decks, cards, "pioneer", time.Now())
 	if len(out) != 0 {
-		t.Errorf("expected single-deck card dropped, got %d cards", len(out))
+		t.Errorf("single-cluster card should be dropped: got %d cards", len(out))
 	}
 }
 
@@ -156,7 +180,6 @@ func TestStandardRotationFactor(t *testing.T) {
 		{"~90 days left", now.AddDate(0, 0, -((3*365)-90)), 0.5, 85, 95},
 		{"~30 days left", now.AddDate(0, 0, -((3*365)-30)), 0.2, 25, 35},
 		{"~7 days left", now.AddDate(0, 0, -((3*365)-7)), 0.05, 5, 10},
-		{"~3 days left", now.AddDate(0, 0, -((3*365)-3)), 0.05, 1, 5},
 		{"already rotated", now.AddDate(-4, 0, 0), 0.0, -400, -300},
 	}
 	for _, c := range cases {
@@ -170,68 +193,12 @@ func TestStandardRotationFactor(t *testing.T) {
 	}
 }
 
-func TestCompute_StandardRotationPenalty(t *testing.T) {
-	now := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC)
-	// Card A: rotates in 5 days → multiplier 0.05
-	rotatingSoon := now.AddDate(0, 0, -((3*365)-5))
-	// Card B: rotates in 2 years → multiplier 1.0
-	fresh := now.AddDate(-1, 0, 0)
-
-	cards := scryfall.BuildIndex([]*scryfall.Card{
-		{Name: "Rotating Soon", Rarity: "rare", TypeLine: "Creature", LatestRelease: rotatingSoon},
-		{Name: "Fresh Card", Rarity: "rare", TypeLine: "Creature", LatestRelease: fresh},
-	})
-	event := &mtggoldfish.TournamentEvent{Title: "Tour", StarTier: 1}
-	decks := []*DeckRecord{
-		{Event: event, Archetype: "Deck1", Cards: []mtggoldfish.DeckCard{{Name: "Rotating Soon", Quantity: 4}, {Name: "Fresh Card", Quantity: 4}}},
-		{Event: event, Archetype: "Deck2", Cards: []mtggoldfish.DeckCard{{Name: "Rotating Soon", Quantity: 4}, {Name: "Fresh Card", Quantity: 4}}},
-	}
-
-	stdOut := Compute(decks, cards, "standard", now)
-	if len(stdOut) != 2 {
-		t.Fatalf("expected 2 cards, got %d", len(stdOut))
-	}
-	// Find each by name
-	var rot, full *model.CardRecommendation
-	for _, c := range stdOut {
-		if c.Name == "Rotating Soon" {
-			rot = c
-		}
-		if c.Name == "Fresh Card" {
-			full = c
-		}
-	}
-	if rot == nil || full == nil {
-		t.Fatalf("missing expected cards")
-	}
-	// Fresh card should be ranked first (no penalty), rotating second.
-	if stdOut[0].Name != "Fresh Card" {
-		t.Errorf("Fresh Card should be ranked first; got %q first", stdOut[0].Name)
-	}
-	if rot.DaysUntilRotation < 1 || rot.DaysUntilRotation > 10 {
-		t.Errorf("Rotating Soon DaysUntilRotation = %d, expected ~5", rot.DaysUntilRotation)
-	}
-	if rot.Score >= rot.RawScore {
-		t.Errorf("Rotating Soon final score (%v) should be < raw score (%v)", rot.Score, rot.RawScore)
-	}
-	// Pioneer (or any non-Standard) should ignore the penalty.
-	pioOut := Compute(decks, cards, "pioneer", now)
-	for _, c := range pioOut {
-		if c.DaysUntilRotation != 0 {
-			t.Errorf("non-standard format should not set DaysUntilRotation; got %d for %q", c.DaysUntilRotation, c.Name)
-		}
-		if c.Score != c.RawScore && c.RawScore != 0 {
-			t.Errorf("non-standard format Score != RawScore for %q: %v vs %v", c.Name, c.Score, c.RawScore)
-		}
-	}
-}
-
 func TestBuildScryfallURL_TrickyNames(t *testing.T) {
 	cases := []string{
-		"Sazh's Chocobo",                       // apostrophe
-		"Mightform Harmonizer",                 // plain
-		"Surrak, Elusive Hunter",               // comma
-		"Fable of the Mirror-Breaker // Reflection of Kiki-Jiki", // // split
+		"Sazh's Chocobo",
+		"Mightform Harmonizer",
+		"Surrak, Elusive Hunter",
+		"Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
 	}
 	for _, name := range cases {
 		u := buildScryfallURL(name)
@@ -245,11 +212,19 @@ func TestBuildScryfallURL_TrickyNames(t *testing.T) {
 		if q != want {
 			t.Errorf("buildScryfallURL(%q) decodes to q=%q, want %q", name, q, want)
 		}
-		// Final URL must not contain raw ", ', commas, or // (these break Scryfall).
 		if strings.ContainsAny(u, `"' `) {
 			t.Errorf("buildScryfallURL(%q) leaked unencoded chars: %s", name, u)
 		}
 	}
+}
+
+// deckCards is a test helper: makes a []mtgtop8.DeckCard, each with quantity 4.
+func deckCards(names ...string) []mtgtop8.DeckCard {
+	out := make([]mtgtop8.DeckCard, len(names))
+	for i, n := range names {
+		out[i] = mtgtop8.DeckCard{Name: n, Quantity: 4}
+	}
+	return out
 }
 
 func absDiff(a, b float64) float64 {

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/model"
-	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtggoldfish"
+	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtgtop8"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/score"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scryfall"
 )
@@ -20,36 +20,32 @@ var ErrScrapeDegraded = errors.New("pipeline: scrape result failed sanity checks
 
 // Config controls one pipeline run.
 type Config struct {
-	Scryfall    *scryfall.Client
-	MTGGoldfish *mtggoldfish.Client
-	Logger      *slog.Logger
+	Scryfall *scryfall.Client
+	MTGTop8  *mtgtop8.Client
+	Logger   *slog.Logger
 
-	// Formats to scrape. Each must match an MTGGoldfish /tournaments/<slug> URL.
-	Formats []mtggoldfish.FormatSpec
+	// Formats to scrape (must be one of mtgtop8.SupportedFormats).
+	Formats []mtgtop8.FormatSpec
 
-	// MaxEventsPerFormat caps the most-recent non-League events we'll consider.
-	// Default 5.
+	// MaxEventsPerFormat caps the most-recent events per format. Default 8.
 	MaxEventsPerFormat int
 
-	// MaxDecksPerEvent caps the deck-fetches per event (taken from the top of
-	// the standings table). Default 16.
+	// MaxDecksPerEvent caps deck fetches per event (top of standings). Default 8.
 	MaxDecksPerEvent int
 
-	// MaxEventAgeDays drops events older than this. Default 30.
+	// MaxEventAgeDays drops events older than this. Default 60.
 	MaxEventAgeDays int
 }
 
 const (
-	defaultMaxEvents    = 10
-	defaultMaxDecks     = 32
-	defaultMaxAgeDays   = 45
-	maxTournamentPages  = 2 // how many MTGGoldfish pages of tournaments to walk
+	defaultMaxEvents    = 8
+	defaultMaxDecks     = 8
+	defaultMaxAgeDays   = 60
 	minFormatsToSucceed = 1
 )
 
-// Run fetches every configured format, ranks each one, and joins them into a
-// single Dataset. If sanity checks fail, returns ErrScrapeDegraded — callers
-// should keep the previous dataset.
+// Run fetches every configured format, ranks each one (per-deck-cluster
+// scoring), and joins them into one Dataset.
 func Run(ctx context.Context, cfg Config) (*model.Dataset, error) {
 	cfg = cfg.withDefaults()
 	logger := cfg.Logger.With("op", "pipeline.run")
@@ -93,7 +89,7 @@ func Run(ctx context.Context, cfg Config) (*model.Dataset, error) {
 
 	ds := &model.Dataset{
 		GeneratedAt: time.Now().UTC(),
-		SourceLabel: "MTGGoldfish tournaments + Scryfall",
+		SourceLabel: "MTGTop8 (Large Events) + Scryfall",
 		Formats:     rankings,
 	}
 
@@ -119,29 +115,16 @@ func runFormat(
 	ctx context.Context,
 	cfg Config,
 	index *scryfall.Index,
-	f mtggoldfish.FormatSpec,
+	f mtgtop8.FormatSpec,
 	cutoff time.Time,
 	logger *slog.Logger,
 ) (*model.FormatRanking, error) {
-	logger.Info("fetching tournaments", "pages", maxTournamentPages)
-	var events []mtggoldfish.TournamentEvent
-	for page := 1; page <= maxTournamentPages; page++ {
-		batch, err := cfg.MTGGoldfish.FetchTournamentsPage(ctx, f.Slug, page)
-		if err != nil {
-			if page == 1 {
-				return nil, fmt.Errorf("tournaments: %w", err)
-			}
-			logger.Warn("tournaments page fetch failed — continuing with what we have",
-				"page", page, "err", err)
-			break
-		}
-		events = append(events, batch...)
-		if len(batch) == 0 {
-			break
-		}
+	logger.Info("fetching format index")
+	events, err := cfg.MTGTop8.FetchFormatIndex(ctx, f)
+	if err != nil {
+		return nil, fmt.Errorf("format index: %w", err)
 	}
 
-	// Filter by age, sort most-recent-first, cap.
 	filtered := events[:0]
 	for _, e := range events {
 		if !e.Date.IsZero() && e.Date.Before(cutoff) {
@@ -155,27 +138,24 @@ func runFormat(
 	if len(filtered) > cfg.MaxEventsPerFormat {
 		filtered = filtered[:cfg.MaxEventsPerFormat]
 	}
-	logger.Info("tournaments filtered", "kept", len(filtered), "raw", len(events))
+	logger.Info("format index filtered", "kept", len(filtered), "raw", len(events))
 
-	// For each event, fetch its detail page to get the full standings list
-	// (the tournaments index only inlines ~4–8 rows per event). Fall back to
-	// the inline standings if the detail fetch fails.
 	type planEntry struct {
-		event    *mtggoldfish.TournamentEvent
-		standing mtggoldfish.DeckStanding
+		event    *mtgtop8.TournamentEvent
+		standing mtgtop8.DeckStanding
 	}
 	seen := map[string]bool{}
 	var plan []planEntry
 	for i := range filtered {
 		ev := &filtered[i]
-		standings, err := cfg.MTGGoldfish.FetchTournamentStandings(ctx, ev.URL)
+		standings, err := cfg.MTGTop8.FetchEvent(ctx, ev.URL)
 		if err != nil || len(standings) == 0 {
 			if err != nil {
-				logger.Warn("event detail fetch failed; using inline standings",
-					"event", ev.Title, "err", err)
+				logger.Warn("event detail fetch failed", "event", ev.Title, "err", err)
 			}
-			standings = ev.Standings
+			continue
 		}
+		ev.Standings = standings
 		limit := cfg.MaxDecksPerEvent
 		if limit > len(standings) {
 			limit = len(standings)
@@ -199,12 +179,10 @@ func runFormat(
 			return nil, ctx.Err()
 		default:
 		}
-		deck, err := cfg.MTGGoldfish.FetchDeck(ctx, p.standing.DeckURL)
+		deck, err := cfg.MTGTop8.FetchDeck(ctx, p.standing.URL)
 		if err != nil {
 			logger.Warn("deck fetch failed",
-				"deck_id", p.standing.DeckID,
-				"event", p.event.Title,
-				"err", err)
+				"deck_id", p.standing.DeckID, "event", p.event.Title, "err", err)
 			miss++
 			continue
 		}
@@ -233,7 +211,7 @@ func runFormat(
 			Name:      ev.Title,
 			URL:       ev.URL,
 			Date:      ev.Date,
-			StarTier:  ev.StarTier,
+			StarTier:  int(ev.TierWeight + 0.5), // approximate display tier
 			DeckCount: used,
 		})
 	}
@@ -262,7 +240,6 @@ func sanityCheck(ds *model.Dataset) error {
 	if len(ds.Formats) < minFormatsToSucceed {
 		return fmt.Errorf("only %d formats produced rankings", len(ds.Formats))
 	}
-	// At least one format must yield a non-trivial card list.
 	hasContent := false
 	for _, r := range ds.Formats {
 		if len(r.Cards) >= 10 {

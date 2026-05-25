@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtggoldfish"
+	"github.com/francescolofranco-dev/mtga-metacrafter/internal/mtgtop8"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/pipeline"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scheduler"
 	"github.com/francescolofranco-dev/mtga-metacrafter/internal/scryfall"
@@ -48,7 +48,7 @@ type config struct {
 	SeedPath      string
 	RefreshPeriod time.Duration
 	LogLevel      slog.Level
-	Formats       []mtggoldfish.FormatSpec // resolved from FORMATS env
+	Formats       []mtgtop8.FormatSpec // resolved from FORMATS env
 }
 
 func loadConfig() config {
@@ -66,20 +66,20 @@ func loadConfig() config {
 // parseFormats turns a comma-separated slug list into FormatSpecs. Unknown
 // slugs are skipped (with a stderr line — main logs them via the slog after
 // loadConfig).
-func parseFormats(s string) []mtggoldfish.FormatSpec {
-	var out []mtggoldfish.FormatSpec
+func parseFormats(s string) []mtgtop8.FormatSpec {
+	var out []mtgtop8.FormatSpec
 	for _, raw := range strings.Split(s, ",") {
 		slug := strings.ToLower(strings.TrimSpace(raw))
 		if slug == "" {
 			continue
 		}
-		if f, ok := mtggoldfish.FormatBySlug(slug); ok {
+		if f, ok := mtgtop8.FormatBySlug(slug); ok {
 			out = append(out, f)
 		}
 	}
 	if len(out) == 0 {
 		// Always have at least one — fall back to Standard.
-		out = []mtggoldfish.FormatSpec{{Slug: "standard", DisplayName: "Standard"}}
+		out = []mtgtop8.FormatSpec{{Slug: "standard", DisplayName: "Standard"}}
 	}
 	return out
 }
@@ -107,10 +107,10 @@ func run(cfg config, logger *slog.Logger) error {
 	}
 
 	pipeCfg := pipeline.Config{
-		Scryfall:    scryfall.NewClient(logger.With("comp", "scryfall")),
-		MTGGoldfish: mtggoldfish.NewClient(logger.With("comp", "mtggoldfish")),
-		Logger:      logger,
-		Formats:     cfg.Formats,
+		Scryfall: scryfall.NewClient(logger.With("comp", "scryfall")),
+		MTGTop8:  mtgtop8.NewClient(logger.With("comp", "mtgtop8")),
+		Logger:   logger,
+		Formats:  cfg.Formats,
 	}
 
 	sched := scheduler.New(cfg.RefreshPeriod, pipeCfg, st, logger.With("comp", "scheduler"))

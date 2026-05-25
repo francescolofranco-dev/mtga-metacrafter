@@ -23,29 +23,33 @@ Picking what to craft with limited wildcards is a guessing game. The data
 
 - **Card data**: [Scryfall](https://scryfall.com/docs/api) bulk JSON and
   `/sets` (official, free).
-- **Tournament data**: [MTGGoldfish](https://www.mtggoldfish.com/) recent
-  tournament listings per format. We walk the most recent pages and pull
-  the full standings from each event's detail page (paper events, MTGO
-  Challenges, AND MTGO 5-0 Leagues). Scraped daily at a polite cadence
-  (1 req/sec, descriptive UA). If you maintain MTGGoldfish and want this
-  removed, open an issue.
-- **Scoring** (per-archetype aggregation, not per-deck — this matters):
+- **Tournament data**: [MTGTop8](https://mtgtop8.com/) — the canonical
+  paper-tournament archive. We use their "Large Events Last 2 Months"
+  view (RCQs, Regional Championships, MTGO Showcase / Challenges, Pro
+  Tours, etc.). Casual store events and 5-0 MTGO Leagues are filtered
+  out at the source. Scraped daily at 1 req/sec with a descriptive UA.
+- **Scoring (deck-similarity clustering, no archetype labels)**:
 
   ```
-  For each archetype A:
-    quality(A)      = √( decks_in_A × avg_tier_weight )
-    contribution(A) = avg_copies × inclusion% × quality(A)
+  Two deck lists belong to the same cluster if their unique mainboard
+  card names overlap ≥ 75% (Jaccard).
+  For each cluster C:
+    avg_tier(C)      = mean event tier weight across cluster's decks
+    size(C)          = √(decks_in_cluster)
+    contribution(C)  = avg_copies × avg_tier(C) × size(C)
 
-  score(card) = Σ contribution(A) over archetypes containing the card
+  score(card) = Σ contribution(C) over every cluster that plays it
   ```
 
-  Square-root dampening on archetype quality stops one dominant archetype
-  from monopolizing the top. A 4-of universal across 5 medium archetypes
-  beats a 4-of locked into one huge archetype — closer to "which crafts
-  unlock the most decks?". Cards must appear in ≥ 2 decks to make the list.
+  Why this shape: a card sitting in 5 distinct clusters can outscore a
+  card stuck in 1 cluster, even a big one. That matches the real
+  question — "if I craft this card, how many different decks does it
+  unlock?". Cards must appear in **≥ 2 clusters** to make the list.
 
-  **Tier weight per event**: 3-star Pro Tour → 4, 2-star → 3, 1-star → 2,
-  unrated paper / MTGO Challenge → 1, MTGO 5-0 League → 0.5.
+  **Tier weight per event** (derived from MTGTop8 event titles):
+  Pro Tour / Worlds → 5, Regional Championship / MagicCon → 4,
+  RCQ / Open / Team Series → 3, MTGO Showcase → 2.5, Store Champ → 2,
+  MTGO Challenge → 1.5, anything else → 1, MTGO League → 0.5.
 - **Rotation penalty (Standard only)**: cards close to rotating out of
   Standard get their score multiplied down: ≥ 180 days left → 1.0,
   90d → 0.5, 30d → 0.2, ≤ 7d → 0.05. Each row carries a "rotates in ~Nd"

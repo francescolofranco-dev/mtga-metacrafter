@@ -1,4 +1,4 @@
-package mtggoldfish
+package mtgtop8
 
 import (
 	"context"
@@ -12,12 +12,15 @@ import (
 )
 
 const (
-	BaseURL   = "https://www.mtggoldfish.com"
-	userAgent = "mtga-metacrafter/0.1 (+https://github.com/francescolofranco-dev/mtga-metacrafter) - polite weekly meta scraper"
+	BaseURL = "https://mtgtop8.com"
+	// MetaLargeEvents is MTGTop8's curated "Large Events Last 2 Months" view.
+	// Drops local store events and casual MTGO Leagues; keeps Regional
+	// Championships, RCQs, MTGO Challenges, MTGO Showcase Challenges, etc.
+	MetaLargeEvents = "46"
+	userAgent       = "mtga-metacrafter/0.2 (+https://github.com/francescolofranco-dev/mtga-metacrafter) - polite tournament-data fetcher"
 )
 
-// Client is a polite HTTP client for MTGGoldfish.
-// All requests share a minimum gap (default 1s) to be a good citizen.
+// Client is a polite HTTP client for MTGTop8.
 type Client struct {
 	HTTP    *http.Client
 	BaseURL string
@@ -37,8 +40,7 @@ func NewClient(logger *slog.Logger) *Client {
 	}
 }
 
-// Get fetches a path (with or without a leading "/") and returns the body.
-// It blocks until MinGap has passed since the previous request.
+// Get fetches a path and returns the body, respecting the rate limit.
 func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
 	if err := c.wait(ctx); err != nil {
 		return nil, err
@@ -63,11 +65,11 @@ func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("mtggoldfish get %s: %w", url, err)
+		return nil, fmt.Errorf("mtgtop8 get %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mtggoldfish %s: status %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("mtgtop8 %s: status %d", url, resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -76,7 +78,7 @@ func (c *Client) wait(ctx context.Context) error {
 	c.mu.Lock()
 	gap := time.Since(c.lastSent)
 	wait := c.MinGap - gap
-	c.lastSent = time.Now().Add(maxDuration(0, wait))
+	c.lastSent = time.Now().Add(maxDur(0, wait))
 	c.mu.Unlock()
 	if wait <= 0 {
 		return nil
@@ -89,7 +91,7 @@ func (c *Client) wait(ctx context.Context) error {
 	}
 }
 
-func maxDuration(a, b time.Duration) time.Duration {
+func maxDur(a, b time.Duration) time.Duration {
 	if a > b {
 		return a
 	}

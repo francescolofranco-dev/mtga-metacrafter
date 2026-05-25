@@ -1,44 +1,48 @@
-# Fly.io config for MTGA MetaCrafter. The `app` name must be globally unique;
-# `flyctl launch --copy-config --no-deploy` will rename it for you if needed.
+# fly.toml app configuration file generated for mtga-metacrafter on 2026-05-25T07:03:22Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "mtga-metacrafter"
-primary_region = "fra"
+app = 'mtga-metacrafter'
+primary_region = 'fra'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  LISTEN_ADDR = ":8080"
-  DATA_DIR = "/data"
-  REFRESH_PERIOD = "24h"
-  FORMATS = "standard,pioneer"
-  LOG_LEVEL = "info"
+  DATA_DIR = '/data'
+  FORMATS = 'standard,pioneer'
+  LISTEN_ADDR = ':8080'
+  LOG_LEVEL = 'info'
+  REFRESH_PERIOD = '24h'
 
 [[mounts]]
-  source = "mtga_metacrafter_data"
-  destination = "/data"
+  source = 'mtga_metacrafter_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
+  processes = ['app']
 
   [http_service.concurrency]
-    type = "requests"
-    soft_limit = 100
+    type = 'requests'
     hard_limit = 200
+    soft_limit = 100
 
-[[http_service.checks]]
-  grace_period = "10s"
-  interval = "30s"
-  method = "GET"
-  timeout = "5s"
-  path = "/healthz"
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/healthz'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
+  size = 'shared-cpu-1x'
+  memory = '256mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256

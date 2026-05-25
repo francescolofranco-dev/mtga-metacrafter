@@ -7,7 +7,8 @@ type TournamentEvent struct {
 	Title     string
 	URL       string // /tournament/<id>
 	Date      time.Time
-	StarTier  int           // 0-3, MTGGoldfish star rating (0 = unrated)
+	StarTier  int            // 0-3, MTGGoldfish star rating (0 = unrated)
+	IsLeague  bool           // MTGO 5-0 league; scored at lower weight
 	Standings []DeckStanding // listed finishers
 }
 

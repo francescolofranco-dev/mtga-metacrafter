@@ -132,16 +132,13 @@ func ParseTournaments(html []byte, baseURL string) ([]TournamentEvent, error) {
 		if title == "" || href == "" {
 			return
 		}
-		if isLeagueTitle(title) {
-			return
-		}
-
 		stars := 0
 		if attr, ok := h.Find("a[aria-label$=' stars']").First().Attr("aria-label"); ok {
 			stars = parseStarTier(attr)
 		}
 
 		date := parseDateFromNobr(h.Find("nobr").First().Text())
+		league := isLeagueTitle(title)
 
 		// The table for this event is the next <table> sibling.
 		table := h.NextAllFiltered("table").First()
@@ -187,6 +184,7 @@ func ParseTournaments(html []byte, baseURL string) ([]TournamentEvent, error) {
 			URL:       joinURL(baseURL, href),
 			Date:      date,
 			StarTier:  stars,
+			IsLeague:  league,
 			Standings: standings,
 		})
 	})

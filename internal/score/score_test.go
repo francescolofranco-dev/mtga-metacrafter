@@ -39,12 +39,14 @@ func TestCompute_BasicScoring(t *testing.T) {
 		t.Fatalf("expected 2 cards, got %d", len(out))
 	}
 
-	// Llanowar Elves: 4*4 + 4*1 = 20
+	// 1 archetype "Selesnya Landfall" with 2 decks of tier 4 + 1.
+	// avg_tier = 2.5, quality = sqrt(2 * 2.5) ≈ 2.236
+	// Llanowar Elves: avg_copies=4, inclusion=1.0 → 4 × 1 × 2.236 ≈ 8.944
 	if out[0].Name != "Llanowar Elves" {
 		t.Errorf("expected Llanowar Elves first, got %q", out[0].Name)
 	}
-	if got, want := out[0].Score, 20.0; absDiff(got, want) > 0.01 {
-		t.Errorf("Llanowar Elves score = %v, want %v", got, want)
+	if got, want := out[0].Score, 8.94; absDiff(got, want) > 0.05 {
+		t.Errorf("Llanowar Elves score = %v, want ≈ %v", got, want)
 	}
 	if out[0].RecommendedCopies != 4 {
 		t.Errorf("Llanowar Elves rec copies = %d, want 4", out[0].RecommendedCopies)
@@ -57,6 +59,48 @@ func TestCompute_BasicScoring(t *testing.T) {
 	}
 	if len(out[0].Archetypes) == 0 || out[0].Archetypes[0].Name != "Selesnya Landfall" {
 		t.Errorf("expected archetype 'Selesnya Landfall', got %+v", out[0].Archetypes)
+	}
+}
+
+func TestCompute_PerArchetypeBeatsArchetypeStuffing(t *testing.T) {
+	// The user's bug: a card stuck in one big dominant archetype shouldn't
+	// always beat a card that spans multiple smaller archetypes. The new
+	// per-archetype scoring should give the diverse card a real shot.
+	cards := scryfall.BuildIndex([]*scryfall.Card{
+		{Name: "Dominant", Rarity: "rare", TypeLine: "Creature"},   // 4-of in one big archetype
+		{Name: "Universal", Rarity: "rare", TypeLine: "Creature"},  // 2-of across many archetypes
+	})
+	event := &mtggoldfish.TournamentEvent{Title: "Challenge", StarTier: 0}
+
+	var decks []*DeckRecord
+	// Big archetype: 8 decks, each plays 4 Dominant and nothing else relevant.
+	for i := 0; i < 8; i++ {
+		decks = append(decks, &DeckRecord{
+			Event: event, Archetype: "Big Deck",
+			Cards: []mtggoldfish.DeckCard{{Name: "Dominant", Quantity: 4}},
+		})
+	}
+	// Five smaller archetypes, 2 decks each, each playing 2 Universal.
+	for _, arch := range []string{"Arch A", "Arch B", "Arch C", "Arch D", "Arch E"} {
+		for i := 0; i < 2; i++ {
+			decks = append(decks, &DeckRecord{
+				Event: event, Archetype: arch,
+				Cards: []mtggoldfish.DeckCard{{Name: "Universal", Quantity: 2}},
+			})
+		}
+	}
+
+	out := Compute(decks, cards, "pioneer", time.Now())
+	if len(out) != 2 {
+		t.Fatalf("expected 2 cards, got %d", len(out))
+	}
+	// Dominant: 1 archetype, 8 decks, quality=sqrt(8*1)=2.83. contribution=4*1*2.83=11.31.
+	// Universal: 5 archetypes, each 2 decks @ quality=sqrt(2*1)=1.41.
+	//   per-archetype contribution = 2*1*1.41 = 2.83 → total across 5 = 14.14.
+	// So Universal must rank ahead of Dominant.
+	if out[0].Name != "Universal" {
+		t.Errorf("Universal (5 archetypes) should outrank Dominant (1 archetype); got order: %q, %q",
+			out[0].Name, out[1].Name)
 	}
 }
 

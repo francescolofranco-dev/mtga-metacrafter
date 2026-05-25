@@ -31,16 +31,22 @@
   <details class="score-help">
     <summary>How is the score calculated?</summary>
     <div class="score-help-body">
-      <p>Every scraped tournament has a tier weight equal to its MTGGoldfish star rating + 1:
-      no stars → 1, 1 star → 2, 2 stars → 3, 3 stars → 4. MTGO leagues are excluded entirely.</p>
-      <p>For each deck a card appears in, we add <code>copies × tier_weight</code> to its raw score.
-      So a 4-of in a 3-star Pro Tour deck contributes 16 points; a 1-of in an unrated weekly contributes 1.</p>
-      <p>A card must appear in at least <strong>2 distinct decks</strong> to make the list — one-off
-      tech choices don't count.</p>
-      <p><strong>Standard only</strong>: the raw score is then multiplied by a rotation penalty based on
-      how soon the card's most recent printing rotates out:
-      ≥ 180d → 1.0,  90d → 0.5,  30d → 0.2,  ≤ 7d → 0.05,  past rotation → 0.
-      A "rotates in ~Nd" badge appears on affected rows.</p>
+      <p>Scoring is <strong>per-archetype</strong>, then summed. This rewards cards that
+      span <em>multiple</em> archetypes (real staples), not just cards stuck in one
+      heavily-played deck.</p>
+      <p>For each archetype <code>A</code> a card appears in:</p>
+      <ul>
+        <li><code>quality(A) = √(decks_in_A × avg_tier_weight)</code>  — square root dampens dominant archetypes so they can't monopolize the top.</li>
+        <li><code>contribution(A) = avg_copies × inclusion% × quality(A)</code></li>
+      </ul>
+      <p><code>score(card) = Σ contribution(A)</code> across every archetype that plays it.
+      A 4-of universal across 5 medium archetypes beats a 4-of locked to one huge archetype.</p>
+      <p><strong>Tier weight per event</strong>: 3-star Pro Tour → 4, 2-star → 3, 1-star → 2,
+      unrated paper / MTGO Challenge → 1, MTGO 5-0 League → 0.5.</p>
+      <p>A card must appear in at least <strong>2 distinct decks</strong> to make the list.</p>
+      <p><strong>Standard only</strong>: the raw score is multiplied by a rotation penalty —
+      ≥ 180d → 1.0, 90d → 0.5, 30d → 0.2, ≤ 7d → 0.05, past rotation → 0. A "rotates in ~Nd"
+      badge appears on affected rows.</p>
       <p><strong>Recommended copies</strong> = the highest copy count seen for the card in any single deck (clamped 1–4).</p>
       <p>Top 30 by final score are shown per format.</p>
     </div>

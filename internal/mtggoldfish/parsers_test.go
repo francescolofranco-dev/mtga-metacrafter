@@ -12,15 +12,28 @@ func TestParseTournaments_RealFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTournaments: %v", err)
 	}
-	if len(events) < 3 {
-		t.Fatalf("expected >= 3 non-League events, got %d", len(events))
+	if len(events) < 6 {
+		t.Fatalf("expected >= 6 events (leagues + tournaments), got %d", len(events))
 	}
 
-	// No League events should slip through.
+	// Both League and non-League events should be present, with the flag set
+	// correctly on each.
+	var leagues, tourneys int
 	for _, e := range events {
-		if isLeagueTitle(e.Title) {
-			t.Errorf("league event leaked into output: %q", e.Title)
+		if e.IsLeague {
+			leagues++
+			if !isLeagueTitle(e.Title) {
+				t.Errorf("non-league title marked as league: %q", e.Title)
+			}
+		} else {
+			tourneys++
+			if isLeagueTitle(e.Title) {
+				t.Errorf("league title marked as non-league: %q", e.Title)
+			}
 		}
+	}
+	if leagues == 0 || tourneys == 0 {
+		t.Errorf("fixture should have both league and non-league events; got leagues=%d, tourneys=%d", leagues, tourneys)
 	}
 
 	// First event sanity checks.

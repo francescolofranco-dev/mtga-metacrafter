@@ -37,63 +37,131 @@ type DeckRecord struct {
 	Cards     []mtggoldfish.DeckCard
 }
 
-// Compute ranks cards across all submitted decks.
+// Compute ranks cards using per-archetype aggregation.
 //
-// Scoring:
+// For each archetype A we compute:
 //
-//	weight(event) = event.StarTier + 1            // 0 stars → 1, 3 stars → 4
-//	raw_score(c)  = Σ_deck (copies × weight)
+//	quality(A) = sqrt( decks_in_A × avg_tier_weight_in_A )
 //
-// For format "standard", we then multiply by a rotation-distance penalty
-// (cards close to rotating out of Standard are sharply discounted). Other
-// formats use raw_score unchanged.
+// and for each card C in A:
 //
-// Recommended copies = highest copy count seen for that card in any single
-// deck, clamped to 1–4.
+//	avg_copies(C,A)    = mean copies in decks-of-A that contain C
+//	inclusion(C,A)     = fraction of decks of A that contain C
+//	contribution(C,A)  = avg_copies × inclusion × quality(A)
+//
+// The card's score is the sum of its contributions across all archetypes it
+// appears in:
+//
+//	raw_score(C) = Σ_A contribution(C, A)
+//
+// Aggregating per-archetype (not per-deck) is the key change: it prevents a
+// single dominant archetype from monopolizing the top of the list, and it
+// rewards cards that span multiple archetypes — exactly the "if I craft this,
+// how many decks does it unlock?" question a player is asking.
+//
+// Tier weights (per event):
+//
+//	3-star Pro Tour       → 4
+//	2-star regional       → 3
+//	1-star notable        → 2
+//	unrated paper / MTGO  → 1
+//	MTGO 5-0 league       → 0.5
+//
+// For format "standard", the raw score is multiplied by a rotation-distance
+// penalty (cards close to leaving Standard are sharply discounted).
+// Recommended copies = highest copy count seen for the card in any single deck.
 func Compute(decks []*DeckRecord, cards *scryfall.Index, formatSlug string, now time.Time) []*model.CardRecommendation {
+	// Group decks by archetype.
+	byArch := map[string][]*DeckRecord{}
+	for _, d := range decks {
+		byArch[d.Archetype] = append(byArch[d.Archetype], d)
+	}
+
 	type agg struct {
-		card            *scryfall.Card
-		score           float64
-		appearances     int
-		maxCopies       int
-		archetypeCount  map[string]int
-		archetypeCopies map[string]int
+		card             *scryfall.Card
+		score            float64
+		totalAppearances int // across all archetypes
+		maxCopies        int
+		archetypes       map[string]*model.ArchetypeRef // archetype name -> ref
 	}
 	aggs := map[string]*agg{}
 
-	for _, rec := range decks {
-		w := tierWeight(rec.Event)
-		for _, dc := range rec.Cards {
-			card, ok := cards.Lookup(dc.Name)
-			if !ok {
-				continue
+	for archName, archDecks := range byArch {
+		// archetype quality
+		tierSum := 0.0
+		for _, d := range archDecks {
+			tierSum += tierWeight(d.Event)
+		}
+		avgTier := tierSum / float64(len(archDecks))
+		quality := math.Sqrt(float64(len(archDecks)) * avgTier)
+
+		// for each card seen in this archetype, sum copies and count decks
+		type counts struct {
+			deckCount  int
+			copiesSum  int
+			maxCopies  int
+			scryCard   *scryfall.Card
+		}
+		archCards := map[string]*counts{}
+
+		for _, d := range archDecks {
+			seenInDeck := map[string]bool{}
+			for _, dc := range d.Cards {
+				card, ok := cards.Lookup(dc.Name)
+				if !ok {
+					continue
+				}
+				if isBasicLand(card.TypeLine) {
+					continue
+				}
+				key := strings.ToLower(card.Name)
+				if seenInDeck[key] {
+					continue // protect against duplicate face matches
+				}
+				seenInDeck[key] = true
+				c := archCards[key]
+				if c == nil {
+					c = &counts{scryCard: card}
+					archCards[key] = c
+				}
+				c.deckCount++
+				c.copiesSum += dc.Quantity
+				if dc.Quantity > c.maxCopies {
+					c.maxCopies = dc.Quantity
+				}
 			}
-			if isBasicLand(card.TypeLine) {
-				continue
-			}
-			key := strings.ToLower(card.Name)
+		}
+
+		// fold per-archetype contributions into the global aggregates
+		for key, c := range archCards {
+			avgCopies := float64(c.copiesSum) / float64(c.deckCount)
+			inclusion := float64(c.deckCount) / float64(len(archDecks))
+			contribution := avgCopies * inclusion * quality
+
 			cur := aggs[key]
 			if cur == nil {
 				cur = &agg{
-					card:            card,
-					archetypeCount:  map[string]int{},
-					archetypeCopies: map[string]int{},
+					card:       c.scryCard,
+					archetypes: map[string]*model.ArchetypeRef{},
 				}
 				aggs[key] = cur
 			}
-			cur.score += float64(dc.Quantity) * float64(w)
-			cur.appearances++
-			if dc.Quantity > cur.maxCopies {
-				cur.maxCopies = dc.Quantity
+			cur.score += contribution
+			cur.totalAppearances += c.deckCount
+			if c.maxCopies > cur.maxCopies {
+				cur.maxCopies = c.maxCopies
 			}
-			cur.archetypeCount[rec.Archetype]++
-			cur.archetypeCopies[rec.Archetype] += dc.Quantity
+			cur.archetypes[archName] = &model.ArchetypeRef{
+				Name:      archName,
+				DeckCount: c.deckCount,
+				AvgCopies: math.Round(avgCopies*10) / 10,
+			}
 		}
 	}
 
 	out := make([]*model.CardRecommendation, 0, len(aggs))
 	for _, a := range aggs {
-		if a.appearances < MinAppearancesToInclude {
+		if a.totalAppearances < MinAppearancesToInclude {
 			continue
 		}
 		raw := a.score
@@ -116,8 +184,8 @@ func Compute(decks []*DeckRecord, cards *scryfall.Index, formatSlug string, now 
 			Score:             round2(final),
 			RawScore:          round2(raw),
 			RecommendedCopies: clampCopies(a.maxCopies),
-			DeckAppearances:   a.appearances,
-			Archetypes:        topArchetypes(a.archetypeCount, a.archetypeCopies),
+			DeckAppearances:   a.totalAppearances,
+			Archetypes:        flattenArchetypes(a.archetypes),
 			DaysUntilRotation: daysLeft,
 		})
 	}
@@ -130,6 +198,25 @@ func Compute(decks []*DeckRecord, cards *scryfall.Index, formatSlug string, now 
 	})
 	if len(out) > MaxResults {
 		out = out[:MaxResults]
+	}
+	return out
+}
+
+// flattenArchetypes turns the map into the display-sorted slice (most
+// decks first, ties alphabetic) and caps to MaxArchetypesToShow.
+func flattenArchetypes(m map[string]*model.ArchetypeRef) []*model.ArchetypeRef {
+	out := make([]*model.ArchetypeRef, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].DeckCount != out[j].DeckCount {
+			return out[i].DeckCount > out[j].DeckCount
+		}
+		return out[i].Name < out[j].Name
+	})
+	if len(out) > MaxArchetypesToShow {
+		out = out[:MaxArchetypesToShow]
 	}
 	return out
 }
@@ -164,11 +251,14 @@ func AnnotateCrossFormat(rankings map[string]*model.FormatRanking) {
 	}
 }
 
-func tierWeight(e *mtggoldfish.TournamentEvent) int {
+func tierWeight(e *mtggoldfish.TournamentEvent) float64 {
 	if e == nil {
 		return 1
 	}
-	return e.StarTier + 1
+	if e.IsLeague {
+		return 0.5
+	}
+	return float64(e.StarTier + 1)
 }
 
 // standardRotationFactor returns (days_until_rotation, multiplier).
@@ -212,32 +302,6 @@ func clampCopies(n int) int {
 
 func round2(f float64) float64 {
 	return math.Round(f*100) / 100
-}
-
-func topArchetypes(counts, copies map[string]int) []*model.ArchetypeRef {
-	refs := make([]*model.ArchetypeRef, 0, len(counts))
-	for name, c := range counts {
-		cp := copies[name]
-		avg := 0.0
-		if c > 0 {
-			avg = float64(cp) / float64(c)
-		}
-		refs = append(refs, &model.ArchetypeRef{
-			Name:      name,
-			DeckCount: c,
-			AvgCopies: math.Round(avg*10) / 10,
-		})
-	}
-	sort.SliceStable(refs, func(i, j int) bool {
-		if refs[i].DeckCount != refs[j].DeckCount {
-			return refs[i].DeckCount > refs[j].DeckCount
-		}
-		return refs[i].Name < refs[j].Name
-	})
-	if len(refs) > MaxArchetypesToShow {
-		refs = refs[:MaxArchetypesToShow]
-	}
-	return refs
 }
 
 // buildScryfallURL returns a Scryfall search URL that lands on the exact card.

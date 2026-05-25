@@ -24,14 +24,28 @@ Picking what to craft with limited wildcards is a guessing game. The data
 - **Card data**: [Scryfall](https://scryfall.com/docs/api) bulk JSON and
   `/sets` (official, free).
 - **Tournament data**: [MTGGoldfish](https://www.mtggoldfish.com/) recent
-  tournament listings per format. We walk the most recent pages, drop MTGO
-  Leagues entirely, and pull the top deck standings from each remaining
-  event. Scraped daily at a polite cadence (1 req/sec, descriptive UA). If
-  you maintain MTGGoldfish and want this removed, open an issue.
-- **Scoring**:
-  `score(card) = Σ over decks (copies_in_deck × tier_weight)`,
-  where `tier_weight = stars + 1` (so a 3-star event counts 4× a base
-  challenge). Cards must appear in ≥ 2 distinct decks to make the list.
+  tournament listings per format. We walk the most recent pages and pull
+  the full standings from each event's detail page (paper events, MTGO
+  Challenges, AND MTGO 5-0 Leagues). Scraped daily at a polite cadence
+  (1 req/sec, descriptive UA). If you maintain MTGGoldfish and want this
+  removed, open an issue.
+- **Scoring** (per-archetype aggregation, not per-deck — this matters):
+
+  ```
+  For each archetype A:
+    quality(A)      = √( decks_in_A × avg_tier_weight )
+    contribution(A) = avg_copies × inclusion% × quality(A)
+
+  score(card) = Σ contribution(A) over archetypes containing the card
+  ```
+
+  Square-root dampening on archetype quality stops one dominant archetype
+  from monopolizing the top. A 4-of universal across 5 medium archetypes
+  beats a 4-of locked into one huge archetype — closer to "which crafts
+  unlock the most decks?". Cards must appear in ≥ 2 decks to make the list.
+
+  **Tier weight per event**: 3-star Pro Tour → 4, 2-star → 3, 1-star → 2,
+  unrated paper / MTGO Challenge → 1, MTGO 5-0 League → 0.5.
 - **Rotation penalty (Standard only)**: cards close to rotating out of
   Standard get their score multiplied down: ≥ 180 days left → 1.0,
   90d → 0.5, 30d → 0.2, ≤ 7d → 0.05. Each row carries a "rotates in ~Nd"

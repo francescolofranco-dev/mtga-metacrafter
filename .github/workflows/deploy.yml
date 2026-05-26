@@ -1,7 +1,10 @@
-name: deploy
+name: deploy-fly
+# Fly.io deploy — kept as a fallback only.
+# Disabled on push so we don't spam failed runs while the trial is expired.
+# If you re-activate Fly and want auto-deploy back, change `on:` to:
+#   push: { branches: [main] }
+#   workflow_dispatch:
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:

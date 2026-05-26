@@ -63,20 +63,32 @@ Picking what to craft with limited wildcards is a guessing game. The data
 
 ## Supported formats
 
-MTGGoldfish's tournament URLs cover: `standard`, `pioneer`, `explorer`,
-`alchemy`, `historic`, `timeless`, `modern`, `pauper`, `legacy`, `vintage`,
-`commander`, `brawl`. Each instance is configured with the `FORMATS` env
-var — defaults to `standard,pioneer`.
-
-Data volume varies hugely between formats; small / casual formats may
-yield very thin rankings.
+MTGTop8 covers paper-Magic formats: `standard`, `pioneer`, `modern`,
+`pauper`, `legacy`, `vintage`. MTGA-only formats (Alchemy, Historic,
+Timeless, Brawl) aren't run as paper tournaments and would need a
+different source — out of scope for now. Each instance is configured
+with the `FORMATS` env var; defaults to `standard,pioneer`.
 
 ## Architecture
 
 A single Go binary. Serves `html/template` + HTMX on top of a per-format
 in-memory dataset that's refreshed on an internal daily schedule and
-persisted to a JSON snapshot for cold-start recovery. Deployed on
-Fly.io free tier.
+persisted to a JSON snapshot for cold-start recovery.
+
+## Hosting
+
+**Primary**: Oracle Cloud Always Free Ampere A1 VM running Ubuntu, with
+Caddy as a TLS-terminating reverse proxy in front of the Go binary on
+`127.0.0.1:8080`. See [docs/oracle-setup.md](docs/oracle-setup.md) for
+the full onboarding playbook. Deploys go through
+`.github/workflows/deploy-oracle.yml` (cross-compile ARM64 → scp →
+systemctl restart).
+
+**Fallback**: `fly.toml` is preserved in the repo and
+`.github/workflows/deploy.yml` (now `deploy-fly`) can be triggered
+manually if you ever want to spin up a Fly machine instead. Note: Fly's
+"free tier" is actually a $5/month trial credit + a card requirement —
+not the no-strings free tier this app was originally built on.
 
 ## Known limitations
 
@@ -84,8 +96,7 @@ Fly.io free tier.
   budget player. A budget-mode toggle is on the roadmap.
 - Rotation dates are *estimated* (`set_release + 3 years`) — close enough
   for the multiplier, but not authoritative.
-- MTGO leagues are excluded as low-stakes 5-0 dumps; if a format only
-  shows league data (rare formats), its ranking will be empty.
+- MTGTop8 doesn't carry MTGA-only formats; we cover paper formats only.
 - No MTGA collection sync yet — deferred.
 
 ## Development
